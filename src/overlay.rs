@@ -1084,7 +1084,7 @@ fn save_dialog(owner: HWND) -> Option<std::path::PathBuf> {
 
 /// Renders `px` (top-down BGRA, w×h) plus vector markup into a new buffer, using a WIC
 /// render target so the output matches the on-screen drawing.
-fn wic_render(factory: &ID2D1Factory, res: &annot::Res, px: &[u8], w: i32, h: i32, shapes: &[Shape], origin: (f32, f32)) -> Result<Vec<u8>> {
+pub(crate) fn wic_render(factory: &ID2D1Factory, res: &annot::Res, px: &[u8], w: i32, h: i32, shapes: &[Shape], origin: (f32, f32)) -> Result<Vec<u8>> {
     use windows::Win32::Graphics::Imaging::*;
     use windows::Win32::System::Com::*;
     unsafe {

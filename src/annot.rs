@@ -155,6 +155,35 @@ pub fn toolbar_layout(sel: &Rect, mon: &Rect, scale: f32) -> Vec<Rect> {
         .collect()
 }
 
+/// Approximate bounding box of a shape (stroke width and text extent included), for exports.
+pub fn shape_bounds(s: &Shape) -> (f32, f32, f32, f32) {
+    let pad = s.width * 2.0 + 2.0;
+    let pts: Vec<(f32, f32)> = match &s.kind {
+        Kind::Pen(p) | Kind::Marker(p) => p.clone(),
+        Kind::Line(a, b) | Kind::Arrow(a, b) => vec![*a, *b],
+        Kind::Rect(r) | Kind::Ellipse(r) | Kind::Blur(r) => vec![(r.l as f32, r.t as f32), (r.r as f32, r.b as f32)],
+        Kind::Text(p, t) => {
+            let lines = t.lines().count().max(1) as f32;
+            let cols = t.lines().map(|l| l.chars().count()).max().unwrap_or(0) as f32;
+            let fs = font_size(s.width);
+            vec![*p, (p.0 + cols * fs * 0.62, p.1 + lines * fs * 1.35)]
+        }
+        Kind::Number(p, _) => {
+            let r = font_size(s.width) * 0.85;
+            vec![(p.0 - r, p.1 - r), (p.0 + r, p.1 + r)]
+        }
+    };
+    let pad = if matches!(s.kind, Kind::Marker(_)) { pad * 2.0 } else { pad };
+    let (mut l, mut t, mut r, mut b) = (f32::MAX, f32::MAX, f32::MIN, f32::MIN);
+    for (x, y) in pts {
+        l = l.min(x);
+        t = t.min(y);
+        r = r.max(x);
+        b = b.max(y);
+    }
+    (l - pad, t - pad, r + pad, b + pad)
+}
+
 // ! --- Drawing --- !
 
 pub struct Res {
@@ -318,6 +347,15 @@ mod tests {
         d.push(s(9));
         assert!(!d.redo(), "new shape clears redo");
         assert_eq!(d.shapes.len(), 2);
+    }
+
+    #[test]
+    fn bounds_cover_stroke_width() {
+        let s = Shape { kind: Kind::Line((10.0, 20.0), (110.0, 5.0)), color: 0, width: 4.0 };
+        assert_eq!(shape_bounds(&s), (0.0, -5.0, 120.0, 30.0));
+        let n = Shape { kind: Kind::Number((50.0, 50.0), 1), color: 0, width: 2.0 };
+        let (l, t, r, b) = shape_bounds(&n);
+        assert!(l < 50.0 - font_size(2.0) * 0.8 && r > 50.0 + font_size(2.0) * 0.8 && t < b);
     }
 
     #[test]

@@ -12,6 +12,32 @@ pub struct Config {
     pub tools: Tools,
     pub history: History,
     pub ink: Ink,
+    pub board: Board,
+}
+
+#[derive(Debug, Clone, Deserialize, PartialEq)]
+#[serde(default)]
+pub struct Board {
+    pub hotkey: String,
+    /// Background opacity, 0.1..1.0.
+    pub opacity: f32,
+    /// Background color, "#RRGGBB".
+    pub background: String,
+}
+
+impl Default for Board {
+    fn default() -> Self {
+        Self { hotkey: "Ctrl+Alt+B".into(), opacity: 0.85, background: "#1E1E1E".into() }
+    }
+}
+
+/// Parses "#RRGGBB" or "RRGGBB" into 0xRRGGBB.
+pub fn parse_color(s: &str) -> Option<u32> {
+    let h = s.trim().trim_start_matches('#');
+    if h.len() != 6 {
+        return None;
+    }
+    u32::from_str_radix(h, 16).ok()
 }
 
 #[derive(Debug, Clone, Deserialize, PartialEq)]
@@ -169,7 +195,7 @@ pub struct Hotkeys {
 
 impl Default for Config {
     fn default() -> Self {
-        Self { log_level: "info".into(), autostart: false, hotkeys: Hotkeys::default(), capture: Capture::default(), save: Save::default(), tools: Tools::default(), history: History::default(), ink: Ink::default() }
+        Self { log_level: "info".into(), autostart: false, hotkeys: Hotkeys::default(), capture: Capture::default(), save: Save::default(), tools: Tools::default(), history: History::default(), ink: Ink::default(), board: Board::default() }
     }
 }
 
@@ -179,7 +205,7 @@ impl Default for Hotkeys {
     }
 }
 
-pub const DEFAULT_TOML: &str = r#"# Shelf config. Changes are applied on save.
+pub const DEFAULT_TOML: &str = r##"# Shelf config. Changes are applied on save.
 
 # trace | debug | info | warn | error
 log_level = "info"
@@ -240,7 +266,13 @@ click_rings_toggle = "Ctrl+Alt+C"
 keys_toggle = "Ctrl+Alt+K"
 click_rings = false
 show_keys = false
-"#;
+
+# Thinking board: a semi-transparent canvas with the markup tools. Esc saves it to the shelf.
+[board]
+hotkey = "Ctrl+Alt+B"
+opacity = 0.85
+background = "#1E1E1E"
+"##;
 
 pub fn app_dir() -> PathBuf {
     let base = std::env::var_os("APPDATA").map(PathBuf::from).unwrap_or_else(|| PathBuf::from("."));
@@ -348,7 +380,7 @@ mod tests {
         assert_eq!(parse(DEFAULT_TOML).unwrap(), Config::default());
         // Every section must be spelled out, so users see all options in the generated file.
         let t: toml::Table = toml::from_str(DEFAULT_TOML).unwrap();
-        for s in ["hotkeys", "capture", "save", "tools", "history", "ink"] {
+        for s in ["hotkeys", "capture", "save", "tools", "history", "ink", "board"] {
             assert!(t.contains_key(s), "DEFAULT_TOML lacks [{s}]");
         }
     }
@@ -359,6 +391,14 @@ mod tests {
         assert_eq!(c.hotkeys.shelf, "Alt+S");
         assert_eq!(c.hotkeys.capture, "PrintScreen");
         assert_eq!(c.log_level, "info");
+    }
+
+    #[test]
+    fn colors() {
+        assert_eq!(parse_color("#1E1E1E"), Some(0x1E1E1E));
+        assert_eq!(parse_color("ff8800"), Some(0xFF8800));
+        assert_eq!(parse_color("#fff"), None);
+        assert_eq!(parse_color("#GGGGGG"), None);
     }
 
     #[test]

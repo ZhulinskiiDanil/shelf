@@ -1,6 +1,7 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod annot;
+mod board;
 mod capture;
 mod clipwatch;
 mod clipboard;
@@ -49,6 +50,7 @@ pub const HK_SPOTLIGHT: i32 = 5;
 pub const HK_ZOOM: i32 = 6;
 pub const HK_RINGS: i32 = 7;
 pub const HK_KEYS: i32 = 8;
+pub const HK_BOARD: i32 = 9;
 
 struct App {
     hwnd: HWND,
@@ -115,6 +117,7 @@ fn main() {
         hook::start(hwnd, WM_APP_CAPTURE);
         overlay::init(hwnd, cfg.capture.magnifier);
         shelf::init();
+        board::init();
         ink::init();
         hook::set_ink_msg(WM_APP_INK);
         apply_config(&cfg, None);
@@ -223,7 +226,8 @@ fn apply_config(cfg: &config::Config, old: Option<&config::Config>) {
         set_autostart(cfg.autostart);
     }
     overlay::set_magnifier(cfg.capture.magnifier);
-    if old.map(|o| (&o.hotkeys, &o.ink)) != Some((&cfg.hotkeys, &cfg.ink)) {
+    board::configure(cfg.board.opacity, config::parse_color(&cfg.board.background).unwrap_or(0x1E1E1E));
+    if old.map(|o| (&o.hotkeys, &o.ink, &o.board.hotkey)) != Some((&cfg.hotkeys, &cfg.ink, &cfg.board.hotkey)) {
         register_hotkeys(cfg);
     }
     sync_ink_features();
@@ -260,6 +264,7 @@ fn register_hotkeys(cfg: &config::Config) {
         (HK_ZOOM, "zoom", &cfg.ink.zoom),
         (HK_RINGS, "click rings", &cfg.ink.click_rings_toggle),
         (HK_KEYS, "show keys", &cfg.ink.keys_toggle),
+        (HK_BOARD, "board", &cfg.board.hotkey),
     ] {
         unsafe {
             let _ = UnregisterHotKey(Some(hwnd), id);
@@ -336,6 +341,7 @@ fn reload_config() {
 fn on_hotkey(id: i32) {
     match id {
         HK_SHELF => shelf::toggle(),
+        HK_BOARD => board::toggle(),
         HK_INK_STICKY => set_ink_sticky(!hook::STICKY.load(std::sync::atomic::Ordering::Relaxed)),
         HK_INK_CLEAR => {
             ink::with(|i| i.clear());

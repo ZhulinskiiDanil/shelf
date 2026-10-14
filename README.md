@@ -57,3 +57,6 @@ cargo test
 | Global | `Ctrl+Alt+Z` | Zoom (wheel: level, `Esc` or right click exits) |
 | Global | `Ctrl+Alt+C` | Toggle click rings |
 | Global | `Ctrl+Alt+K` | Toggle pressed-keys overlay |
+| Global | `Ctrl+Alt+B` | Thinking board (`Esc` saves to the shelf and closes) |
+| Board | Same tool, color and width keys as capture markup; `Ctrl+Z` / `Ctrl+Y` | Draw |
+| Board | Middle button drag, `Space`+drag | Pan |

@@ -47,14 +47,14 @@ pub fn fade_alpha(age: Duration, delay: Duration, fade: Duration) -> f32 {
     }
 }
 
-struct Gpu {
-    swap: IDXGISwapChain1,
-    dc: ID2D1DeviceContext,
+pub(crate) struct Gpu {
+    pub swap: IDXGISwapChain1,
+    pub dc: ID2D1DeviceContext,
     _dcomp: IDCompositionDevice,
     _target: IDCompositionTarget,
     _visual: IDCompositionVisual,
-    stroke_style: ID2D1StrokeStyle,
-    res: annot::Res,
+    pub stroke_style: ID2D1StrokeStyle,
+    pub res: annot::Res,
 }
 
 struct Zoom {
@@ -158,7 +158,7 @@ pub fn init() {
     }
 }
 
-fn create_gpu(hwnd: HWND, w: u32, h: u32) -> Result<Gpu> {
+pub(crate) fn create_gpu(hwnd: HWND, w: u32, h: u32) -> Result<Gpu> {
     unsafe {
         let mut dev: Option<ID3D11Device> = None;
         D3D11CreateDevice(None, D3D_DRIVER_TYPE_HARDWARE, HMODULE::default(), D3D11_CREATE_DEVICE_BGRA_SUPPORT, None, D3D11_SDK_VERSION, Some(&mut dev), None, None)?;
