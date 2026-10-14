@@ -88,6 +88,8 @@ pub struct Overlay {
     blur_bmps: Vec<(Rect, ID2D1Bitmap)>,
     /// M14 image mode: a large image (e.g. a scrolling capture) shown as a scaled preview.
     full: Option<FullImage>,
+    /// M15 check-before-sending state.
+    redact: Option<RedactUi>,
 }
 
 thread_local! {
@@ -158,6 +160,7 @@ pub fn init(owner: HWND, magnifier: bool) {
             pending: None,
             blur_bmps: Vec::new(),
             full: None,
+            redact: None,
         };
         // Warm up: device, brushes and the screen buffer are allocated now, not on first PrtScrn.
         ov.ensure_gfx();
@@ -293,6 +296,7 @@ impl Overlay {
         self.ensure_gfx();
         self.upload();
         let t_up = t0.elapsed();
+        self.redact = None;
         self.mode = Mode::Hover;
         self.sel = Rect::default();
         self.doc.clear();
@@ -389,6 +393,7 @@ impl Overlay {
                 if matches!(self.mode, Mode::Selected | Mode::Grabbing { .. } | Mode::Annotating) {
                     self.draw_toolbar(g, scale);
                 }
+                self.draw_redaction(g, scale);
             }
             if self.magnifier && !matches!(self.mode, Mode::Selected | Mode::Annotating | Mode::Grabbing { grip: Grip::Move, .. }) {
                 self.draw_magnifier(g, bmp, scale);
@@ -408,7 +413,8 @@ impl Overlay {
         unsafe {
             g.rt.PushAxisAlignedClip(clip, D2D1_ANTIALIAS_MODE_ALIASED);
             for s in &self.doc.shapes {
-                if let Kind::Blur(r) = &s.kind {
+                if let Some((r, _)) = annot::pixel_op(&s.kind) {
+                    let r = &r;
                     if let Some((_, b)) = self.blur_bmps.iter().find(|(br, _)| br == r) {
                         let d = rf(&r.offset(-self.bounds.l, -self.bounds.t));
                         g.rt.DrawBitmap(b, Some(&d), 1.0, D2D1_BITMAP_INTERPOLATION_MODE_NEAREST_NEIGHBOR, None);
@@ -574,6 +580,9 @@ impl Overlay {
 
     fn on_lbutton_down(&mut self, x: i32, y: i32) {
         self.cursor = (x, y);
+        if self.redaction_click(x, y) {
+            return;
+        }
         if self.mode == Mode::Selected {
             if let Some(i) = self.toolbar().iter().position(|r| r.contains(x, y)) {
                 self.commit_text();
@@ -696,8 +705,8 @@ impl Overlay {
             Kind::Text(_, t) if t.is_empty() => return,
             _ => {}
         }
-        if let Kind::Blur(r) = &s.kind {
-            self.make_blur_bitmap(*r);
+        if let Some((r, smear)) = annot::pixel_op(&s.kind) {
+            self.make_blur_bitmap(r, smear);
         }
         self.doc.push(s);
     }
@@ -728,18 +737,27 @@ impl Overlay {
         }
     }
 
+    /// Blur radius for redaction: enough to wipe out letters of the box height.
+    fn smear_radius(r: &Rect) -> usize {
+        (r.h().min(r.w()) / 2).clamp(4, 40) as usize
+    }
+
     fn block_size(r: &Rect) -> i32 {
         (r.w().min(r.h()) / 6).clamp(6, 16)
     }
 
-    fn make_blur_bitmap(&mut self, r: Rect) {
+    fn make_blur_bitmap(&mut self, r: Rect, smear: bool) {
         let (Some(f), Some(g)) = (self.frame.as_ref(), self.gfx.as_ref()) else { return };
         let r = r.intersect(&f.bounds);
         if r.is_empty() {
             return;
         }
         let mut patch = f.crop(&r);
-        annot::pixelate(&mut patch, r.w() as usize * 4, (r.l, r.t), (r.w(), r.h()), &r, Self::block_size(&r));
+        if smear {
+            crate::redact::blur(&mut patch, r.w() as usize, r.h() as usize, (0, 0, r.w(), r.h()), Self::smear_radius(&r));
+        } else {
+            annot::pixelate(&mut patch, r.w() as usize * 4, (r.l, r.t), (r.w(), r.h()), &r, Self::block_size(&r));
+        }
         let props = D2D1_BITMAP_PROPERTIES {
             pixelFormat: D2D1_PIXEL_FORMAT { format: DXGI_FORMAT_B8G8R8A8_UNORM, alphaMode: D2D1_ALPHA_MODE_IGNORE },
             dpiX: 96.0,
@@ -812,7 +830,8 @@ impl Overlay {
         }
         let (w, h) = (target.w(), target.h());
         for s in &self.doc.shapes {
-            if let Kind::Blur(full) = &s.kind {
+            if let Some((full_r, smear)) = annot::pixel_op(&s.kind) {
+                let full = &full_r;
                 // Same blocks as the preview: pixelate the whole patch, then copy the visible part.
                 let r = full.intersect(target);
                 if r.is_empty() {
@@ -820,7 +839,11 @@ impl Overlay {
                 }
                 let mut patch = f.crop(full);
                 let fr = full.intersect(&f.bounds);
-                annot::pixelate(&mut patch, fr.w() as usize * 4, (fr.l, fr.t), (fr.w(), fr.h()), &fr, Self::block_size(&fr));
+                if smear {
+                    crate::redact::blur(&mut patch, fr.w() as usize, fr.h() as usize, (0, 0, fr.w(), fr.h()), Self::smear_radius(&fr));
+                } else {
+                    annot::pixelate(&mut patch, fr.w() as usize * 4, (fr.l, fr.t), (fr.w(), fr.h()), &fr, Self::block_size(&fr));
+                }
                 for y in r.t..r.b {
                     let src = (y - fr.t) as usize * fr.w() as usize * 4 + (r.l - fr.l) as usize * 4;
                     let dst = (y - target.t) as usize * w as usize * 4 + (r.l - target.l) as usize * 4;
@@ -829,7 +852,7 @@ impl Overlay {
                 }
             }
         }
-        if self.doc.shapes.iter().all(|s| matches!(s.kind, Kind::Blur(_))) {
+        if self.doc.shapes.iter().all(|s| annot::pixel_op(&s.kind).is_some()) {
             return Some((dims.0, dims.1, px));
         }
         match wic_render(&self.factory, &self.res, &px, w, h, &self.doc.shapes, (target.l as f32, target.t as f32), 1.0) {
@@ -902,6 +925,9 @@ impl Overlay {
                     target.w(),
                     target.h()
                 );
+                if config::current().redaction.background {
+                    background_check(img.clone());
+                }
                 history::add_async(img, "capture");
                 None
             }
@@ -1039,6 +1065,21 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) 
                 }
                 let alt = key_down(VK_MENU);
                 let cfg = config::current();
+                if with(|o| o.redact.as_ref().is_some_and(|r| !r.busy)).unwrap_or(false) && (vk == VK_RETURN || vk == VK_ESCAPE) {
+                    with(|o| {
+                        if vk == VK_RETURN {
+                            o.apply_redaction();
+                        } else {
+                            o.redact = None;
+                            o.redraw();
+                        }
+                    });
+                    return LRESULT(0);
+                }
+                if config::hotkey_is(&cfg.redaction.key, vk.0 as u32, ctrl, shift, alt) {
+                    with(|o| o.start_redaction());
+                    return LRESULT(0);
+                }
                 if config::hotkey_is(&cfg.scroll_capture.key, vk.0 as u32, ctrl, shift, alt) && with(|o| o.full.is_none()).unwrap_or(false) {
                     finish(Finish::Scroll, t0);
                     return LRESULT(0);
@@ -1237,6 +1278,7 @@ impl Overlay {
         self.ensure_gfx();
         self.upload();
         self.full = Some(FullImage { img, rect });
+        self.redact = None;
         self.mode = Mode::Selected;
         self.sel = rect;
         self.doc.clear();
@@ -1274,15 +1316,19 @@ impl Overlay {
         }
         let mut px = crop_image(img, &t);
         for s in &self.doc.shapes {
-            if let Kind::Blur(r) = &s.kind {
-                let br = map(r).intersect(&t);
+            if let Some((r, smear)) = annot::pixel_op(&s.kind) {
+                let br = map(&r).intersect(&t);
                 if !br.is_empty() {
-                    annot::pixelate(&mut px, t.w() as usize * 4, (t.l, t.t), (t.w(), t.h()), &br, Self::block_size(&br));
+                    if smear {
+                        crate::redact::blur(&mut px, t.w() as usize, t.h() as usize, (br.l - t.l, br.t - t.t, br.r - t.l, br.b - t.t), Self::smear_radius(&br));
+                    } else {
+                        annot::pixelate(&mut px, t.w() as usize * 4, (t.l, t.t), (t.w(), t.h()), &br, Self::block_size(&br));
+                    }
                 }
             }
         }
         let dims = (t.w() as u32, t.h() as u32);
-        if self.doc.shapes.iter().all(|s| matches!(s.kind, Kind::Blur(_))) {
+        if self.doc.shapes.iter().all(|s| annot::pixel_op(&s.kind).is_some()) {
             return Some((dims.0, dims.1, px));
         }
         // Markup coordinates are preview pixels; map them onto the full image.
@@ -1296,4 +1342,218 @@ impl Overlay {
         }
     }
 
+}
+
+// ! --- Check before sending (M15) --- !
+
+pub struct RedactUi {
+    busy: bool,
+    seq: u32,
+    /// Findings in overlay coordinates: box, kind, enabled.
+    items: Vec<(Rect, crate::redact::Kind, bool)>,
+}
+
+static REDACT_SEQ: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+
+/// Last background check result: the copied image and what was found in it (image pixels).
+static PENDING: std::sync::Mutex<Option<(Arc<Image>, Vec<crate::redact::Finding>)>> = std::sync::Mutex::new(None);
+
+pub fn start_redaction() {
+    with(|o| o.start_redaction());
+}
+
+fn ocr_findings(img: &Image) -> std::result::Result<Vec<crate::redact::Finding>, crate::ocr::OcrError> {
+    unsafe {
+        let _ = windows::Win32::System::Com::CoInitializeEx(None, windows::Win32::System::Com::COINIT_MULTITHREADED);
+    }
+    let t0 = Instant::now();
+    let lines = crate::ocr::recognize_words(img)?;
+    let found = crate::redact::find(&lines, &config::current().redaction.detectors());
+    log::info!("redaction: {} finding(s) in {}x{} ({:.0} ms)", found.len(), img.w, img.h, t0.elapsed().as_secs_f64() * 1000.0);
+    Ok(found)
+}
+
+fn no_ocr_notice() {
+    crate::notify("Shelf: OCR недоступен", "Нет языкового пакета распознавания (ru/en). Параметры → Время и язык → Язык.");
+}
+
+impl Overlay {
+    fn start_redaction(&mut self) {
+        let target = self.target();
+        if target.is_empty() || self.redact.as_ref().is_some_and(|r| r.busy) {
+            return;
+        }
+        self.commit_text();
+        // Analyse the pixels as they are now (full resolution in image mode).
+        let (img, factor) = match &self.full {
+            Some(f) => {
+                let sx = f.img.w as f32 / f.rect.w() as f32;
+                let t = Rect::new(
+                    ((target.l - f.rect.l) as f32 * sx) as i32,
+                    ((target.t - f.rect.t) as f32 * sx) as i32,
+                    ((target.r - f.rect.l) as f32 * sx) as i32,
+                    ((target.b - f.rect.t) as f32 * sx) as i32,
+                )
+                .intersect(&Rect::new(0, 0, f.img.w as i32, f.img.h as i32));
+                (Image { w: t.w() as u32, h: t.h() as u32, bgra: crop_image(&f.img, &t) }, sx)
+            }
+            None => {
+                let Some(fr) = self.frame.as_ref() else { return };
+                (Image { w: target.w() as u32, h: target.h() as u32, bgra: fr.crop(&target) }, 1.0)
+            }
+        };
+        let origin = (target.l as f32, target.t as f32);
+        let seq = REDACT_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
+        self.redact = Some(RedactUi { busy: true, seq, items: Vec::new() });
+        self.redraw();
+        let pad = config::current().redaction.padding as f32;
+        std::thread::spawn(move || {
+            let res = ocr_findings(&img);
+            crate::run_on_main(move || {
+                with(|o| o.redaction_result(seq, res, factor, origin, pad));
+            });
+        });
+    }
+
+    fn redaction_result(&mut self, seq: u32, res: std::result::Result<Vec<crate::redact::Finding>, crate::ocr::OcrError>, factor: f32, origin: (f32, f32), pad: f32) {
+        if !self.visible || self.redact.as_ref().map(|r| r.seq) != Some(seq) {
+            return;
+        }
+        let found = match res {
+            Ok(f) => f,
+            Err(crate::ocr::OcrError::NoLanguages) => {
+                self.redact = None;
+                no_ocr_notice();
+                self.redraw();
+                return;
+            }
+            Err(crate::ocr::OcrError::Failed(e)) => {
+                log::error!("redaction OCR failed: {e}");
+                self.redact = None;
+                self.redraw();
+                return;
+            }
+        };
+        if found.is_empty() {
+            self.redact = None;
+            self.redraw();
+            crate::chip::show(crate::chip::Content::Notice("ничего подозрительного".into()), self.cursor);
+            return;
+        }
+        let items = found
+            .iter()
+            .map(|f| {
+                let (l, t, r, b) = f.rect;
+                let r = Rect::new(
+                    (origin.0 + (l - pad) / factor).floor() as i32,
+                    (origin.1 + (t - pad) / factor).floor() as i32,
+                    (origin.0 + (r + pad) / factor).ceil() as i32,
+                    (origin.1 + (b + pad) / factor).ceil() as i32,
+                );
+                (r, f.kind, true)
+            })
+            .collect();
+        self.redact = Some(RedactUi { busy: false, seq, items });
+        self.redraw();
+    }
+
+    /// Enter: burn the enabled findings into the markup (irreversible in the output pixels).
+    fn apply_redaction(&mut self) {
+        let Some(ui) = self.redact.take() else { return };
+        let style = config::current().redaction.style.to_ascii_lowercase();
+        for (r, _, on) in ui.items {
+            if !on {
+                continue;
+            }
+            let kind = match style.as_str() {
+                "pixelate" => Kind::Blur(r),
+                "blur" => Kind::Smear(r),
+                _ => Kind::Fill(r),
+            };
+            self.commit_shape(Shape { kind, color: 0x000000, width: self.width });
+        }
+        self.redraw();
+    }
+
+    /// Click on a finding toggles it. Returns true if the click was used.
+    fn redaction_click(&mut self, x: i32, y: i32) -> bool {
+        let Some(ui) = self.redact.as_mut() else { return false };
+        if let Some(item) = ui.items.iter_mut().find(|(r, _, _)| r.contains(x, y)) {
+            item.2 = !item.2;
+            self.redraw();
+            return true;
+        }
+        false
+    }
+
+    fn draw_redaction(&self, g: &Gfx, scale: f32) {
+        let Some(ui) = &self.redact else { return };
+        let o = (self.bounds.l, self.bounds.t);
+        let t = self.target();
+        if ui.busy {
+            self.label(g, "Проверка на личные данные…", (t.l - o.0) as f32, (t.t - o.1) as f32 + 4.0 * scale, scale);
+            return;
+        }
+        unsafe {
+            let on = g.rt.CreateSolidColorBrush(&annot::rgba(0xFF9100, 1.0), None).ok();
+            let off = g.rt.CreateSolidColorBrush(&annot::rgba(0x9E9E9E, 0.9), None).ok();
+            for (r, kind, enabled) in &ui.items {
+                let d = rf(&r.offset(-o.0, -o.1));
+                if let Some(b) = if *enabled { &on } else { &off } {
+                    g.rt.DrawRectangle(&d, b, if *enabled { 2.0 * scale } else { 1.0 }, None);
+                }
+                let tag = if *enabled { kind.label().to_string() } else { format!("{} — не скрывать", kind.label()) };
+                self.label(g, &tag, d.left, d.top - 19.0 * scale, scale * 0.85);
+            }
+        }
+        let n = ui.items.iter().filter(|i| i.2).count();
+        self.label(g, &format!("Найдено: {} · клик — отключить · Enter — скрыть {n} · Esc — отмена", ui.items.len()), (t.l - o.0) as f32, (t.b - o.1) as f32 + 6.0 * scale, scale);
+    }
+}
+
+/// After a normal Ctrl+C (option `redaction.background`): check the copied image quietly.
+fn background_check(img: Arc<Image>) {
+    std::thread::spawn(move || {
+        let Ok(found) = ocr_findings(&img) else { return };
+        if found.is_empty() {
+            *PENDING.lock().unwrap() = None;
+            return;
+        }
+        *PENDING.lock().unwrap() = Some((img, found));
+        let hk = config::current().redaction.hide_hotkey;
+        crate::run_on_main(move || {
+            let mut pt = POINT::default();
+            unsafe {
+                let _ = GetCursorPos(&mut pt);
+            }
+            crate::chip::show(crate::chip::Content::Notice(format!("⚠ возможно личное, {hk} чтобы скрыть")), (pt.x, pt.y));
+        });
+    });
+}
+
+/// Hotkey after a background warning: replace the clipboard image with the hidden version.
+pub fn hide_pending() {
+    let Some((img, found)) = PENDING.lock().unwrap().take() else { return };
+    let cfg = config::current().redaction;
+    let mut px = img.bgra.clone();
+    let (w, h) = (img.w as usize, img.h as usize);
+    let pad = cfg.padding as f32;
+    for f in &found {
+        let (l, t, r, b) = f.rect;
+        let rr = ((l - pad).floor() as i32, (t - pad).floor() as i32, (r + pad).ceil() as i32, (b + pad).ceil() as i32);
+        let area = Rect::new(rr.0, rr.1, rr.2, rr.3);
+        match cfg.style.to_ascii_lowercase().as_str() {
+            "pixelate" => annot::pixelate(&mut px, w * 4, (0, 0), (w as i32, h as i32), &area, Overlay::block_size(&area)),
+            "blur" => crate::redact::blur(&mut px, w, h, rr, Overlay::smear_radius(&area)),
+            _ => crate::redact::fill(&mut px, w, h, rr, [0, 0, 0]),
+        }
+    }
+    let out = Arc::new(Image { w: img.w, h: img.h, bgra: px });
+    clipboard::set_image(crate::main_hwnd(), out.clone());
+    history::add_async(out, "capture");
+    let mut pt = POINT::default();
+    unsafe {
+        let _ = GetCursorPos(&mut pt);
+    }
+    crate::chip::show(crate::chip::Content::Notice(format!("Скрыто: {}", found.len())), (pt.x, pt.y));
 }

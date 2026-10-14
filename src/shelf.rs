@@ -31,6 +31,7 @@ const CMD_PIN: usize = 4;
 const CMD_DELETE: usize = 5;
 const CMD_OPEN: usize = 6;
 const CMD_TEXT: usize = 7;
+const CMD_PRIVACY: usize = 8;
 
 struct Shelf {
     hwnd: HWND,
@@ -292,7 +293,7 @@ impl Shelf {
                     "Shelf is empty — captures and copied images appear here".to_string()
                 } else {
                     format!(
-                        "{} items   ·   drag out   ·   Ctrl+C image   ·   Ctrl+Shift+C path   ·   T text   ·   P pin   ·   Del delete   ·   O folder",
+                        "{} items   ·   drag out   ·   Ctrl+C image   ·   Ctrl+Shift+C path   ·   T text   ·   R privacy   ·   P pin   ·   Del delete   ·   O folder",
                         self.items.len()
                     )
                 };
@@ -368,6 +369,16 @@ impl Shelf {
         if let Some(img) = std::fs::read(&path).ok().and_then(|b| crate::imageio::decode_png(&b)) {
             crate::ocr_to_clipboard(std::sync::Arc::new(img));
         }
+    }
+
+    /// Opens the selected capture in markup and runs the personal-data check (M15).
+    fn check_privacy(&mut self) {
+        let Some(&i) = self.sorted_selection().first() else { return };
+        let path = history::path_of(&self.items[i].file);
+        let Some(img) = std::fs::read(&path).ok().and_then(|b| crate::imageio::decode_png(&b)) else { return };
+        self.hide();
+        crate::overlay::show_image(std::sync::Arc::new(img));
+        crate::overlay::start_redaction();
     }
 
     fn copy_paths(&self) {
@@ -492,6 +503,7 @@ fn context_menu(x: i32, y: i32) {
         CMD_COPY => s.copy_image(),
         CMD_PATH => s.copy_paths(),
         CMD_TEXT => s.copy_text(),
+        CMD_PRIVACY => s.check_privacy(),
         CMD_FOLDER => s.open_folder(),
         CMD_PIN => s.toggle_pin(),
         CMD_DELETE => s.delete(),
@@ -646,6 +658,7 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) 
                     VK_DELETE => s.delete(),
                     VK_P => s.toggle_pin(),
                     VK_T => s.copy_text(),
+                    VK_R => s.check_privacy(),
                     VK_O => s.open_folder(),
                     VK_RETURN => s.open_file(),
                     VK_LEFT => s.move_sel(-1),

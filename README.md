@@ -9,6 +9,7 @@ A fast, fully offline screenshot tool for Windows 10/11: a Lightshot replacement
 - **Dictation** — hold a key, speak, get text (local Whisper model).
 - **Recording** — any area to MP4.
 - **Long screenshots** — scroll and stitch any area (fixed headers and footers appear once).
+- **Check before sending** — find emails, phones, IPs, card numbers, tokens and secret links in a capture (OCR) and hide them irreversibly.
 - **Clipboard chip** — whatever you copy anywhere (color, link, file, JSON, image, text, code) briefly shows next to the cursor; secrets are masked.
 - **Text history** — every copied text, searchable from a Win+V-style picker; pinned entries can be templates with `{fields}`. Stored encrypted (DPAPI).
 
@@ -44,6 +45,7 @@ All hotkeys are defaults and can be changed in Settings, which also reports conf
 | `Ctrl+Alt+X` | Toggle the clipboard chip (what was just copied, shown next to the cursor) | `clipboard_chip.toggle` |
 | `Ctrl+Shift+V` | Text history picker (type to filter, `Enter` pastes, `Shift+Enter` copies, `Ctrl+P` pins, `Del` deletes) | `text_history.picker` |
 | `Ctrl+Alt+P` | Pause / resume text history | `text_history.pause` |
+| `Ctrl+Alt+H` | After a background warning: replace the copied image with the redacted one | `redaction.hide_hotkey` |
 
 ### Capture mode (after `PrtScrn`)
 
@@ -59,6 +61,7 @@ All hotkeys are defaults and can be changed in Settings, which also reports conf
 | `Ctrl+T` | Recognize text (OCR) and copy it |
 | `Ctrl+R` | Record the selected area to MP4 |
 | `Ctrl+L` | Scrolling (long) screenshot of the selection; `Enter`/`Esc` stops early (`scroll_capture.key`) |
+| `Ctrl+P` | Check for personal data (OCR): click a box to keep it, `Enter` hides the rest, `Esc` cancels (`redaction.key`) |
 | `Esc`, right click | Cancel |
 | `P` `L` `A` `R` `E` `M` `T` `B` `N` | Pen, line, arrow, rectangle, ellipse, marker, text, pixelate, numbered marker (`[tools]`) |
 | `1`–`8` · `[` `]`, mouse wheel | Color · stroke width |
@@ -73,6 +76,7 @@ All hotkeys are defaults and can be changed in Settings, which also reports conf
 | Click, `Ctrl`/`Shift`+click, `Ctrl+A`, arrows | Select |
 | Drag | Drag files out (the shelf closes after a drop) |
 | `Ctrl+C` · `Ctrl+Shift+C` · `T` | Copy image · copy quoted paths · copy text (OCR) |
+| `R` | Check the capture for personal data and redact it |
 | `P` · `Del` · `O` · `Enter`, double click | Pin · delete · show in folder · open |
 | `Esc`, click outside | Close |
 | `Tab`, click the header | Switch between Captures and Text (text: type to search, `Enter` / `Ctrl+C` copy, `Ctrl+P` pin, `Del` delete, drag a row out) |

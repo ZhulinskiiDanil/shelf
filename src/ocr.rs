@@ -16,16 +16,7 @@ pub enum OcrError {
 /// Recognises text in `img`, trying every installed engine among ru/en and keeping
 /// the result that best matches its own alphabet. Blocking; call off the UI thread.
 pub fn recognize(img: &Image) -> Result<String, OcrError> {
-    let engines: Vec<(&str, OcrEngine)> = ["ru", "en"]
-        .into_iter()
-        .filter_map(|tag| {
-            let lang = Language::CreateLanguage(&HSTRING::from(tag)).ok()?;
-            if !OcrEngine::IsLanguageSupported(&lang).unwrap_or(false) {
-                return None;
-            }
-            OcrEngine::TryCreateFromLanguage(&lang).ok().map(|e| (tag, e))
-        })
-        .collect();
+    let engines = engines();
     if engines.is_empty() {
         return Err(OcrError::NoLanguages);
     }
@@ -76,16 +67,22 @@ fn to_software_bitmap(img: &Image) -> windows::core::Result<SoftwareBitmap> {
 /// if at least half of the Russian result's letters are Cyrillic, it wins; otherwise English
 /// (the Russian engine sometimes reads Latin as Cyrillic look-alikes).
 pub fn pick(results: Vec<(&str, String)>) -> String {
+    match pick_index(&results) {
+        Some(i) => results[i].1.clone(),
+        None => String::new(),
+    }
+}
+
+/// Index of the result to use (see `pick`).
+pub fn pick_index(results: &[(&str, String)]) -> Option<usize> {
     let cyr = |t: &str| t.chars().filter(|c| matches!(c, 'а'..='я' | 'А'..='Я' | 'ё' | 'Ё')).count();
     let letters = |t: &str| t.chars().filter(|c| c.is_alphabetic()).count();
-    let ru = results.iter().find(|r| r.0 == "ru");
-    let en = results.iter().find(|r| r.0 == "en");
+    let ru = results.iter().position(|r| r.0 == "ru");
+    let en = results.iter().position(|r| r.0 == "en");
     match (ru, en) {
-        (Some(r), Some(e)) => {
-            if cyr(&r.1) * 2 >= letters(&r.1).max(1) { r.1.clone() } else { e.1.clone() }
-        }
-        (Some(only), None) | (None, Some(only)) => only.1.clone(),
-        (None, None) => results.into_iter().next().map(|r| r.1).unwrap_or_default(),
+        (Some(r), Some(e)) => Some(if cyr(&results[r].1) * 2 >= letters(&results[r].1).max(1) { r } else { e }),
+        (Some(only), None) | (None, Some(only)) => Some(only),
+        (None, None) => (!results.is_empty()).then_some(0),
     }
 }
 
@@ -116,4 +113,76 @@ mod tests {
             assert_eq!(&p.bgra[16..20], &[1, 2, 3, 255]);
         }
     }
+}
+
+fn engines() -> Vec<(&'static str, OcrEngine)> {
+    ["ru", "en"]
+        .into_iter()
+        .filter_map(|tag| {
+            let lang = Language::CreateLanguage(&HSTRING::from(tag)).ok()?;
+            if !OcrEngine::IsLanguageSupported(&lang).unwrap_or(false) {
+                return None;
+            }
+            OcrEngine::TryCreateFromLanguage(&lang).ok().map(|e| (tag, e))
+        })
+        .collect()
+}
+
+/// Words with boxes (pixels of `img`), grouped by line. Tall images are processed in
+/// overlapping horizontal tiles so small text survives (no downscaling of long captures).
+pub fn recognize_words(img: &Image) -> Result<Vec<Vec<crate::redact::Word>>, OcrError> {
+    const TILE: u32 = 2400;
+    const OVERLAP: u32 = 120;
+    let engines = engines();
+    if engines.is_empty() {
+        return Err(OcrError::NoLanguages);
+    }
+    let fail = |e: windows::core::Error| OcrError::Failed(e.to_string());
+    let mut out = Vec::new();
+    let mut y0 = 0u32;
+    loop {
+        let h = (img.h - y0).min(TILE);
+        let stride = img.w as usize * 4;
+        let tile = Image { w: img.w, h, bgra: img.bgra[y0 as usize * stride..(y0 + h) as usize * stride].to_vec() };
+        let prepared = prepare(&tile);
+        let k = prepared.w as f32 / tile.w as f32;
+        let bitmap = to_software_bitmap(&prepared).map_err(fail)?;
+        let mut per_engine: Vec<(&str, String, Vec<Vec<crate::redact::Word>>)> = Vec::new();
+        for (tag, engine) in &engines {
+            let r = engine.RecognizeAsync(&bitmap).and_then(|op| op.join()).map_err(fail)?;
+            let mut lines = Vec::new();
+            let mut text = String::new();
+            for line in r.Lines().map_err(fail)? {
+                let mut words = Vec::new();
+                for w in line.Words().map_err(fail)? {
+                    let b = w.BoundingRect().map_err(fail)?;
+                    let t = w.Text().map_err(fail)?.to_string();
+                    words.push(crate::redact::Word { text: t, rect: (b.X / k, b.Y / k + y0 as f32, (b.X + b.Width) / k, (b.Y + b.Height) / k + y0 as f32) });
+                }
+                text.push_str(&line.Text().map(|t| t.to_string()).unwrap_or_default());
+                text.push('\n');
+                lines.push(words);
+            }
+            per_engine.push((tag, text, lines));
+        }
+        let texts: Vec<(&str, String)> = per_engine.iter().map(|(t, s, _)| (*t, s.clone())).collect();
+        let chosen = pick_index(&texts).map(|i| per_engine.swap_remove(i).2).unwrap_or_default();
+        let last = y0 + h >= img.h;
+        for line in chosen {
+            let top = line.iter().map(|w| w.rect.1).fold(f32::MAX, f32::min);
+            // Lines in an overlap belong to exactly one tile.
+            if y0 > 0 && top < (y0 + OVERLAP / 2) as f32 {
+                continue;
+            }
+            if !last && top >= (y0 + h - OVERLAP / 2) as f32 {
+                continue;
+            }
+            out.push(line);
+        }
+        if last {
+            break;
+        }
+        y0 += h - OVERLAP;
+    }
+    Ok(out)
 }

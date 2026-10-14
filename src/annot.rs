@@ -51,6 +51,10 @@ pub enum Kind {
     Ellipse(Rect),
     Text((f32, f32), String),
     Blur(Rect),
+    /// Redaction: solid fill (drawn as a vector, burned into the output pixels).
+    Fill(Rect),
+    /// Redaction: strong blur (pixel operation, like Blur).
+    Smear(Rect),
     Number((f32, f32), u32),
 }
 
@@ -161,7 +165,7 @@ pub fn shape_bounds(s: &Shape) -> (f32, f32, f32, f32) {
     let pts: Vec<(f32, f32)> = match &s.kind {
         Kind::Pen(p) | Kind::Marker(p) => p.clone(),
         Kind::Line(a, b) | Kind::Arrow(a, b) => vec![*a, *b],
-        Kind::Rect(r) | Kind::Ellipse(r) | Kind::Blur(r) => vec![(r.l as f32, r.t as f32), (r.r as f32, r.b as f32)],
+        Kind::Rect(r) | Kind::Ellipse(r) | Kind::Blur(r) | Kind::Fill(r) | Kind::Smear(r) => vec![(r.l as f32, r.t as f32), (r.r as f32, r.b as f32)],
         Kind::Text(p, t) => {
             let lines = t.lines().count().max(1) as f32;
             let cols = t.lines().map(|l| l.chars().count()).max().unwrap_or(0) as f32;
@@ -182,6 +186,15 @@ pub fn shape_bounds(s: &Shape) -> (f32, f32, f32, f32) {
         b = b.max(y);
     }
     (l - pad, t - pad, r + pad, b + pad)
+}
+
+/// Shapes that are pixel operations on the captured image rather than vector drawing.
+pub fn pixel_op(k: &Kind) -> Option<(Rect, bool)> {
+    match k {
+        Kind::Blur(r) => Some((*r, false)),
+        Kind::Smear(r) => Some((*r, true)),
+        _ => None,
+    }
 }
 
 // ! --- Drawing --- !
@@ -307,7 +320,12 @@ pub fn draw(rt: &ID2D1RenderTarget, res: &Res, shapes: &[Shape], o: (f32, f32)) 
                     let lr = D2D_RECT_F { left: p.0 - o.0 - rad, top: p.1 - o.1 - rad, right: p.0 - o.0 + rad, bottom: p.1 - o.1 + rad };
                     rt.DrawText(&t, &fmt, &lr, &fg, D2D1_DRAW_TEXT_OPTIONS_NONE, DWRITE_MEASURING_MODE_NATURAL);
                 }
-                Kind::Blur(_) => {}
+                Kind::Blur(_) | Kind::Smear(_) => {}
+                Kind::Fill(r) => {
+                    let f = D2D_RECT_F { left: r.l as f32 - o.0, top: r.t as f32 - o.1, right: r.r as f32 - o.0, bottom: r.b as f32 - o.1 };
+                    let Ok(solid) = rt.CreateSolidColorBrush(&rgba(s.color, 1.0), None) else { continue };
+                    rt.FillRectangle(&f, &solid);
+                }
             }
         }
     }

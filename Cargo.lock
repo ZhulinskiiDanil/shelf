@@ -390,6 +390,7 @@ version = "1.0.0"
 dependencies = [
  "log",
  "png",
+ "regex",
  "serde",
  "serde_json",
  "toml",

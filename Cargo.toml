@@ -6,6 +6,7 @@ edition = "2024"
 [dependencies]
 log = "0.4.34"
 png = "0.18.1"
+regex = "1.13.1"
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = { version = "1.0.154", features = ["preserve_order"] }
 toml = "1.1.8"
@@ -20,6 +21,7 @@ version = "*"
 version = "0.62.2"
 features = [
     "Foundation",
+    "Foundation_Collections",
     "Globalization",
     "Graphics_Imaging",
     "Media_Ocr",

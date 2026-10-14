@@ -36,7 +36,7 @@ const fn f(page: &'static str, section: &'static str, key: &'static str, label: 
     Field { page, section, key, label, kind }
 }
 
-pub const PAGES: [&str; 8] = ["Общие", "Хоткеи", "Захват", "Инструменты", "Рисование", "Диктовка", "Запись", "Буфер"];
+pub const PAGES: [&str; 9] = ["Общие", "Хоткеи", "Захват", "Инструменты", "Рисование", "Диктовка", "Запись", "Буфер", "Приватность"];
 
 pub const FIELDS: &[Field] = &[
     f("Общие", "", "autostart", "Запускать вместе с Windows", Kind::Bool),
@@ -60,6 +60,8 @@ pub const FIELDS: &[Field] = &[
     f("Хоткеи", "text_history", "picker", "История текста (список)", Kind::Hotkey),
     f("Хоткеи", "text_history", "pause", "История текста: пауза", Kind::Hotkey),
     f("Хоткеи", "scroll_capture", "key", "Длинный скриншот (в режиме выделения)", Kind::CaptureKey),
+    f("Хоткеи", "redaction", "key", "Проверка перед отправкой (в режиме выделения)", Kind::CaptureKey),
+    f("Хоткеи", "redaction", "hide_hotkey", "Скрыть найденное после фоновой проверки", Kind::Hotkey),
     f("Захват", "capture", "magnifier", "Лупа у курсора", Kind::Bool),
     f("Захват", "save", "dir", "Папка для Ctrl+S (пусто = Изображения\\Shelf)", Kind::Path),
     f("Захват", "save", "filename", "Шаблон имени (%Y %m %d %H %M %S)", Kind::Text),
@@ -101,6 +103,15 @@ pub const FIELDS: &[Field] = &[
     f("Буфер", "text_history", "max_age_days", "История текста: хранить дней (0 — всегда)", Kind::Int),
     f("Буфер", "text_history", "max_entry_kb", "История текста: макс. размер записи, КБ", Kind::Int),
     f("Буфер", "text_history", "ignore_processes", "История текста: не сохранять из программ", Kind::List),
+    f("Приватность", "redaction", "style", "Как скрывать (fill, pixelate, blur)", Kind::Text),
+    f("Приватность", "redaction", "padding", "Запас вокруг слова, px", Kind::Int),
+    f("Приватность", "redaction", "background", "Фоновая проверка после Ctrl+C", Kind::Bool),
+    f("Приватность", "redaction", "email", "Искать email", Kind::Bool),
+    f("Приватность", "redaction", "phone", "Искать телефоны", Kind::Bool),
+    f("Приватность", "redaction", "ip", "Искать IP-адреса", Kind::Bool),
+    f("Приватность", "redaction", "card", "Искать номера карт", Kind::Bool),
+    f("Приватность", "redaction", "token", "Искать токены и ключи", Kind::Bool),
+    f("Приватность", "redaction", "url_secret", "Искать секреты в ссылках", Kind::Bool),
 ];
 
 /// Current value of a field from the effective config, as text for the editor.
@@ -146,6 +157,17 @@ pub fn read(c: &config::Config, fl: &Field) -> String {
         ("clipboard_chip", "ignore_processes") => c.clipboard_chip.ignore_processes.join(", "),
         ("text_history", "enabled") => b(c.text_history.enabled),
         ("scroll_capture", "key") => c.scroll_capture.key.clone(),
+        ("redaction", "key") => c.redaction.key.clone(),
+        ("redaction", "hide_hotkey") => c.redaction.hide_hotkey.clone(),
+        ("redaction", "style") => c.redaction.style.clone(),
+        ("redaction", "padding") => c.redaction.padding.to_string(),
+        ("redaction", "background") => b(c.redaction.background),
+        ("redaction", "email") => b(c.redaction.email),
+        ("redaction", "phone") => b(c.redaction.phone),
+        ("redaction", "ip") => b(c.redaction.ip),
+        ("redaction", "card") => b(c.redaction.card),
+        ("redaction", "token") => b(c.redaction.token),
+        ("redaction", "url_secret") => b(c.redaction.url_secret),
         ("scroll_capture", "mode") => c.scroll_capture.mode.clone(),
         ("scroll_capture", "step") => c.scroll_capture.step.to_string(),
         ("scroll_capture", "settle_ms") => c.scroll_capture.settle_ms.to_string(),

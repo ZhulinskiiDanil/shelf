@@ -18,6 +18,53 @@ pub struct Config {
     pub clipboard_chip: ClipboardChip,
     pub text_history: TextHistory,
     pub scroll_capture: ScrollCapture,
+    pub redaction: Redaction,
+}
+
+/// M15: check a capture for personal data before sending it.
+#[derive(Debug, Clone, Deserialize, PartialEq)]
+#[serde(default)]
+pub struct Redaction {
+    /// Key in capture mode (and `R` on the shelf).
+    pub key: String,
+    /// "fill" (solid), "pixelate" or "blur".
+    pub style: String,
+    /// Margin around each found word, px.
+    pub padding: u32,
+    /// Quietly check every Ctrl+C capture afterwards and offer to hide what was found.
+    pub background: bool,
+    /// Replaces the clipboard image with the hidden version after a background warning.
+    pub hide_hotkey: String,
+    pub email: bool,
+    pub phone: bool,
+    pub ip: bool,
+    pub card: bool,
+    pub token: bool,
+    pub url_secret: bool,
+}
+
+impl Default for Redaction {
+    fn default() -> Self {
+        Self {
+            key: "Ctrl+P".into(),
+            style: "fill".into(),
+            padding: 3,
+            background: false,
+            hide_hotkey: "Ctrl+Alt+H".into(),
+            email: true,
+            phone: true,
+            ip: true,
+            card: true,
+            token: true,
+            url_secret: true,
+        }
+    }
+}
+
+impl Redaction {
+    pub fn detectors(&self) -> crate::redact::Detectors {
+        crate::redact::Detectors { email: self.email, phone: self.phone, ip: self.ip, card: self.card, token: self.token, url_secret: self.url_secret }
+    }
 }
 
 /// M14: scrolling (long) screenshots.
@@ -332,7 +379,7 @@ pub struct Hotkeys {
 
 impl Default for Config {
     fn default() -> Self {
-        Self { log_level: "info".into(), autostart: false, hotkeys: Hotkeys::default(), capture: Capture::default(), save: Save::default(), tools: Tools::default(), history: History::default(), ink: Ink::default(), board: Board::default(), dictation: Dictation::default(), record: Record::default(), clipboard_chip: ClipboardChip::default(), text_history: TextHistory::default(), scroll_capture: ScrollCapture::default() }
+        Self { log_level: "info".into(), autostart: false, hotkeys: Hotkeys::default(), capture: Capture::default(), save: Save::default(), tools: Tools::default(), history: History::default(), ink: Ink::default(), board: Board::default(), dictation: Dictation::default(), record: Record::default(), clipboard_chip: ClipboardChip::default(), text_history: TextHistory::default(), scroll_capture: ScrollCapture::default(), redaction: Redaction::default() }
     }
 }
 
@@ -464,6 +511,22 @@ settle_ms = 150
 max_height = 30000
 # Scroll the window back afterwards (auto mode)
 restore_scroll = true
+
+# Check before sending: find personal data in a capture (OCR) and hide it
+[redaction]
+key = "Ctrl+P"
+# fill, pixelate or blur
+style = "fill"
+padding = 3
+# Quietly check every Ctrl+C capture and offer to hide what was found
+background = false
+hide_hotkey = "Ctrl+Alt+H"
+email = true
+phone = true
+ip = true
+card = true
+token = true
+url_secret = true
 "##;
 
 pub fn app_dir() -> PathBuf {
@@ -572,7 +635,7 @@ mod tests {
         assert_eq!(parse(DEFAULT_TOML).unwrap(), Config::default());
         // Every section must be spelled out, so users see all options in the generated file.
         let t: toml::Table = toml::from_str(DEFAULT_TOML).unwrap();
-        for s in ["hotkeys", "capture", "save", "tools", "history", "ink", "board", "dictation", "record", "clipboard_chip", "text_history", "scroll_capture"] {
+        for s in ["hotkeys", "capture", "save", "tools", "history", "ink", "board", "dictation", "record", "clipboard_chip", "text_history", "scroll_capture", "redaction"] {
             assert!(t.contains_key(s), "DEFAULT_TOML lacks [{s}]");
         }
     }

@@ -22,6 +22,7 @@ mod names;
 mod ocr;
 mod overlay;
 mod record;
+mod redact;
 mod settings;
 mod settings_model;
 mod scroll;
@@ -72,6 +73,7 @@ pub const HK_REC_STOP: i32 = 10;
 pub const HK_CHIP: i32 = 11;
 pub const HK_TEXT_PICK: i32 = 12;
 pub const HK_TEXT_PAUSE: i32 = 13;
+pub const HK_REDACT_HIDE: i32 = 14;
 
 struct App {
     hwnd: HWND,
@@ -261,7 +263,7 @@ fn apply_config(cfg: &config::Config, old: Option<&config::Config>) {
     }
     overlay::set_magnifier(cfg.capture.magnifier);
     board::configure(cfg.board.opacity, config::parse_color(&cfg.board.background).unwrap_or(0x1E1E1E));
-    if old.map(|o| (&o.hotkeys, &o.ink, &o.board.hotkey, &o.dictation.hold, &o.record.stop, &o.clipboard_chip, &o.text_history)) != Some((&cfg.hotkeys, &cfg.ink, &cfg.board.hotkey, &cfg.dictation.hold, &cfg.record.stop, &cfg.clipboard_chip, &cfg.text_history)) {
+    if old.map(|o| (&o.hotkeys, &o.ink, &o.board.hotkey, &o.dictation.hold, &o.record.stop, &o.clipboard_chip, &o.text_history, &o.redaction.hide_hotkey)) != Some((&cfg.hotkeys, &cfg.ink, &cfg.board.hotkey, &cfg.dictation.hold, &cfg.record.stop, &cfg.clipboard_chip, &cfg.text_history, &cfg.redaction.hide_hotkey)) {
         register_hotkeys(cfg);
     }
     sync_ink_features();
@@ -317,6 +319,7 @@ fn register_hotkeys(cfg: &config::Config) {
         (HK_CHIP, "clipboard chip", &cfg.clipboard_chip.toggle),
         (HK_TEXT_PICK, "text picker", &cfg.text_history.picker),
         (HK_TEXT_PAUSE, "text history pause", &cfg.text_history.pause),
+        (HK_REDACT_HIDE, "hide personal data", &cfg.redaction.hide_hotkey),
     ] {
         unsafe {
             let _ = UnregisterHotKey(Some(hwnd), id);
@@ -400,6 +403,7 @@ fn on_hotkey(id: i32) {
         HK_BOARD => board::toggle(),
         HK_REC_STOP => stop_recording(),
         HK_TEXT_PICK => textpick::toggle(),
+        HK_REDACT_HIDE => overlay::hide_pending(),
         HK_TEXT_PAUSE => {
             use std::sync::atomic::Ordering;
             let paused = !texthist::PAUSED.fetch_xor(true, Ordering::Relaxed);
