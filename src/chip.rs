@@ -41,7 +41,7 @@ static WORKER: OnceLock<Mutex<Sender<()>>> = OnceLock::new();
 
 /// WM_CLIPBOARDUPDATE on the UI thread: only a nudge to the worker, nothing is read here.
 pub fn on_update() {
-    if !ENABLED.load(Ordering::Relaxed) || !crate::config::current().clipboard_chip.enabled {
+    if !chip_on() && !crate::config::current().text_history.enabled {
         return;
     }
     let tx = WORKER.get_or_init(|| {
@@ -100,7 +100,12 @@ fn owner_process(owner: HWND) -> Option<String> {
     }
 }
 
+fn chip_on() -> bool {
+    ENABLED.load(Ordering::Relaxed) && crate::config::current().clipboard_chip.enabled
+}
+
 /// Reads only what is needed under the clipboard lock, then classifies outside it.
+/// Also feeds the text history (M13), which shares this listener and its privacy rules.
 fn build() -> Option<(Content, (i32, i32))> {
     let cfg = crate::config::current().clipboard_chip;
     let mut pt = POINT::default();
@@ -108,14 +113,8 @@ fn build() -> Option<(Content, (i32, i32))> {
         let _ = GetCursorPos(&mut pt);
     }
     let owner = unsafe { GetClipboardOwner() }.unwrap_or_default();
-    if owner == crate::main_hwnd() && !cfg.show_own {
-        return None;
-    }
-    if let Some(exe) = owner_process(owner) {
-        if cfg.ignore_processes.iter().any(|p| p.trim().eq_ignore_ascii_case(&exe)) {
-            return None;
-        }
-    }
+    let exe = owner_process(owner).unwrap_or_default();
+    let show = chip_on() && !(owner == crate::main_hwnd() && !cfg.show_own) && !cfg.ignore_processes.iter().any(|p| p.trim().eq_ignore_ascii_case(&exe));
     let excl = unsafe { RegisterClipboardFormatW(w!("ExcludeClipboardContentFromMonitorProcessing")) };
     let hist = unsafe { RegisterClipboardFormatW(w!("CanIncludeInClipboardHistory")) };
     if !open_clipboard() {
@@ -128,7 +127,13 @@ fn build() -> Option<(Content, (i32, i32))> {
         let _ = CloseClipboard();
         raw
     };
+    if let Some(Some(Raw::Text(t, truncated))) = &raw {
+        crate::texthist::record(t, &exe, *truncated);
+    }
     let pos = (pt.x, pt.y);
+    if !show {
+        return None;
+    }
     match raw {
         None => Some((Content::Locked, pos)),
         Some(r) => Some((describe(r?), pos)),

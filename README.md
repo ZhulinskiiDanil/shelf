@@ -9,6 +9,7 @@ A fast, fully offline screenshot tool for Windows 10/11: a Lightshot replacement
 - **Dictation** — hold a key, speak, get text (local Whisper model).
 - **Recording** — any area to MP4.
 - **Clipboard chip** — whatever you copy anywhere (color, link, file, JSON, image, text, code) briefly shows next to the cursor; secrets are masked.
+- **Text history** — every copied text, searchable from a Win+V-style picker; pinned entries can be templates with `{fields}`. Stored encrypted (DPAPI).
 
 ## Install
 
@@ -40,6 +41,8 @@ All hotkeys are defaults and can be changed in Settings, which also reports conf
 | Hold `Ctrl+Alt+V` | Dictation: record while held, text to the clipboard on release | `dictation.hold` |
 | `Ctrl+Alt+R` | Stop area recording | `record.stop` |
 | `Ctrl+Alt+X` | Toggle the clipboard chip (what was just copied, shown next to the cursor) | `clipboard_chip.toggle` |
+| `Ctrl+Shift+V` | Text history picker (type to filter, `Enter` pastes, `Shift+Enter` copies, `Ctrl+P` pins, `Del` deletes) | `text_history.picker` |
+| `Ctrl+Alt+P` | Pause / resume text history | `text_history.pause` |
 
 ### Capture mode (after `PrtScrn`)
 
@@ -70,6 +73,7 @@ All hotkeys are defaults and can be changed in Settings, which also reports conf
 | `Ctrl+C` · `Ctrl+Shift+C` · `T` | Copy image · copy quoted paths · copy text (OCR) |
 | `P` · `Del` · `O` · `Enter`, double click | Pin · delete · show in folder · open |
 | `Esc`, click outside | Close |
+| `Tab`, click the header | Switch between Captures and Text (text: type to search, `Enter` / `Ctrl+C` copy, `Ctrl+P` pin, `Del` delete, drag a row out) |
 
 ### Screen ink
 

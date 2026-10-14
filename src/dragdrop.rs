@@ -101,3 +101,22 @@ impl WideZ for std::ffi::OsStr {
         self.encode_wide().chain(Some(0)).collect()
     }
 }
+
+/// Drag-out of plain text (CF_UNICODETEXT) with a normal (button held) drag.
+pub fn drag_text(text: &str) -> bool {
+    unsafe {
+        let Ok(data) = SHCreateDataObject::<_, IDataObject>(None, None, None) else { return false };
+        let wide: Vec<u16> = text.encode_utf16().chain(Some(0)).collect();
+        let bytes = std::slice::from_raw_parts(wide.as_ptr() as *const u8, wide.len() * 2);
+        let Some(h) = clipboard::global_bytes(bytes) else { return false };
+        let fmt = FORMATETC { cfFormat: 13 /* CF_UNICODETEXT */, ptd: std::ptr::null_mut(), dwAspect: DVASPECT_CONTENT.0, lindex: -1, tymed: TYMED_HGLOBAL.0 as u32 };
+        let med = STGMEDIUM { tymed: TYMED_HGLOBAL.0 as u32, u: STGMEDIUM_0 { hGlobal: h }, pUnkForRelease: ManuallyDrop::new(None) };
+        if data.SetData(&fmt, &med, true).is_err() {
+            return false;
+        }
+        let src: IDropSource = Source { click_to_drop: false, seen_down: Cell::new(false) }.into();
+        let mut effect = DROPEFFECT_NONE;
+        let hr = DoDragDrop(&data, &src, DROPEFFECT_COPY, &mut effect);
+        hr == DRAGDROP_S_DROP && effect != DROPEFFECT_NONE
+    }
+}

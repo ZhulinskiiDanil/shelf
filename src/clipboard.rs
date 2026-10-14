@@ -22,6 +22,10 @@ fn png_format() -> u32 {
     unsafe { RegisterClipboardFormatW(w!("PNG")) }
 }
 
+pub fn global_bytes(b: &[u8]) -> Option<HGLOBAL> {
+    global_from(&[b])
+}
+
 fn global_from(bytes: &[&[u8]]) -> Option<HGLOBAL> {
     let len: usize = bytes.iter().map(|b| b.len()).sum();
     unsafe {

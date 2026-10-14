@@ -16,6 +16,39 @@ pub struct Config {
     pub dictation: Dictation,
     pub record: Record,
     pub clipboard_chip: ClipboardChip,
+    pub text_history: TextHistory,
+}
+
+/// M13: history of copied text (encrypted with DPAPI) and the picker.
+#[derive(Debug, Clone, Deserialize, PartialEq)]
+#[serde(default)]
+pub struct TextHistory {
+    pub enabled: bool,
+    /// Opens the picker next to the cursor.
+    pub picker: String,
+    /// Pauses/resumes recording.
+    pub pause: String,
+    pub max_items: usize,
+    /// Unpinned entries older than this are removed; 0 = keep forever.
+    pub max_age_days: u64,
+    /// Larger copies are not stored.
+    pub max_entry_kb: usize,
+    /// Executable names whose copies are never stored.
+    pub ignore_processes: Vec<String>,
+}
+
+impl Default for TextHistory {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            picker: "Ctrl+Shift+V".into(),
+            pause: "Ctrl+Alt+P".into(),
+            max_items: 1000,
+            max_age_days: 30,
+            max_entry_kb: 64,
+            ignore_processes: ["KeePass.exe", "KeePassXC.exe", "1Password.exe", "Bitwarden.exe"].map(String::from).to_vec(),
+        }
+    }
 }
 
 /// M12: a short chip near the cursor showing what was just copied.
@@ -268,7 +301,7 @@ pub struct Hotkeys {
 
 impl Default for Config {
     fn default() -> Self {
-        Self { log_level: "info".into(), autostart: false, hotkeys: Hotkeys::default(), capture: Capture::default(), save: Save::default(), tools: Tools::default(), history: History::default(), ink: Ink::default(), board: Board::default(), dictation: Dictation::default(), record: Record::default(), clipboard_chip: ClipboardChip::default() }
+        Self { log_level: "info".into(), autostart: false, hotkeys: Hotkeys::default(), capture: Capture::default(), save: Save::default(), tools: Tools::default(), history: History::default(), ink: Ink::default(), board: Board::default(), dictation: Dictation::default(), record: Record::default(), clipboard_chip: ClipboardChip::default(), text_history: TextHistory::default() }
     }
 }
 
@@ -375,6 +408,18 @@ fade_ms = 0
 # Also for copies made by Shelf itself
 show_own = true
 # Never show the chip for copies from these programs
+ignore_processes = ["KeePass.exe", "KeePassXC.exe", "1Password.exe", "Bitwarden.exe"]
+
+# History of copied text (encrypted for the current Windows user) and the picker
+[text_history]
+enabled = true
+picker = "Ctrl+Shift+V"
+pause = "Ctrl+Alt+P"
+max_items = 1000
+# Unpinned entries older than this are removed (0 = keep)
+max_age_days = 30
+# Larger copies are not stored
+max_entry_kb = 64
 ignore_processes = ["KeePass.exe", "KeePassXC.exe", "1Password.exe", "Bitwarden.exe"]
 "##;
 
@@ -484,7 +529,7 @@ mod tests {
         assert_eq!(parse(DEFAULT_TOML).unwrap(), Config::default());
         // Every section must be spelled out, so users see all options in the generated file.
         let t: toml::Table = toml::from_str(DEFAULT_TOML).unwrap();
-        for s in ["hotkeys", "capture", "save", "tools", "history", "ink", "board", "dictation", "record", "clipboard_chip"] {
+        for s in ["hotkeys", "capture", "save", "tools", "history", "ink", "board", "dictation", "record", "clipboard_chip", "text_history"] {
             assert!(t.contains_key(s), "DEFAULT_TOML lacks [{s}]");
         }
     }

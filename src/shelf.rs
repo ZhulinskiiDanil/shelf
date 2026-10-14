@@ -48,6 +48,12 @@ struct Shelf {
     /// Menu or drag loop running: ignore deactivation.
     modal: bool,
     visible: bool,
+    // M13 "Текст" tab
+    text_tab: bool,
+    query: String,
+    texts: Vec<crate::texthist::Entry>,
+    tsel: usize,
+    ttop: usize,
 }
 
 thread_local! {
@@ -89,6 +95,11 @@ pub fn init() {
             press: None,
             modal: false,
             visible: false,
+            text_tab: false,
+            query: String::new(),
+            texts: Vec::new(),
+            tsel: 0,
+            ttop: 0,
         };
         SHELF.with(|c| *c.borrow_mut() = Some(s));
         let raw = hwnd.0 as isize;
@@ -274,7 +285,10 @@ impl Shelf {
             rt.FillRectangle(&full, &bg);
             rt.DrawRectangle(&full, &card, 2.0, None);
             if let Some(f) = &fmt {
-                let hint = if self.items.is_empty() {
+                self.render_tabs(&rt, f, &accent, &text, &dim);
+                let hint = if self.text_tab {
+                    "Enter, Ctrl+C — копировать   ·   перетащите наружу   ·   Ctrl+P — закрепить   ·   Del — удалить   ·   Tab — снимки".to_string()
+                } else if self.items.is_empty() {
                     "Shelf is empty — captures and copied images appear here".to_string()
                 } else {
                     format!(
@@ -283,10 +297,19 @@ impl Shelf {
                     )
                 };
                 let t: Vec<u16> = hint.encode_utf16().collect();
-                let r = D2D_RECT_F { left: 10.0 * s, top: 9.0 * s, right: self.size.0 as f32, bottom: self.header() as f32 };
+                let r = D2D_RECT_F { left: 160.0 * s, top: 9.0 * s, right: self.size.0 as f32, bottom: self.header() as f32 };
                 rt.DrawText(&t, f, &r, &dim, D2D1_DRAW_TEXT_OPTIONS_NONE, DWRITE_MEASURING_MODE_NATURAL);
             }
-            for i in 0..self.items.len() {
+            if self.text_tab {
+                let small = self.dw.CreateTextFormat(w!("Segoe UI"), None, DWRITE_FONT_WEIGHT_NORMAL, DWRITE_FONT_STYLE_NORMAL, DWRITE_FONT_STRETCH_NORMAL, 11.0 * s, w!("")).ok();
+                let big = self.dw.CreateTextFormat(w!("Segoe UI"), None, DWRITE_FONT_WEIGHT_NORMAL, DWRITE_FONT_STYLE_NORMAL, DWRITE_FONT_STRETCH_NORMAL, 13.0 * s, w!("")).ok();
+                if let (Some(b), Some(sm), Some(selb)) = (big, small, brush(0x2F8CFF, 0.25)) {
+                    let _ = b.SetWordWrapping(DWRITE_WORD_WRAPPING_NO_WRAP);
+                    let _ = sm.SetWordWrapping(DWRITE_WORD_WRAPPING_NO_WRAP);
+                    self.render_text_tab(&rt, &b, &sm, &accent, &text, &dim, &selb);
+                }
+            }
+            for i in 0..if self.text_tab { 0 } else { self.items.len() } {
                 if !self.visible_row(i) {
                     continue;
                 }
@@ -509,6 +532,19 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) 
                 let (x, y) = lp_xy(lp);
                 let (ctrl, shift) = (key_down(VK_CONTROL), key_down(VK_SHIFT));
                 with(|s| {
+                    let (shots, texts) = s.tab_rects();
+                    if shots.contains(x, y) || texts.contains(x, y) {
+                        s.set_tab(texts.contains(x, y));
+                        return;
+                    }
+                    if s.text_tab {
+                        if let Some(i) = s.text_row_at(y) {
+                            s.tsel = i;
+                            s.redraw();
+                            s.press = Some((x, y));
+                        }
+                        return;
+                    }
                     match s.hit(x, y) {
                         Some(i) if s.selected.contains(&i) && !ctrl && !shift => {}
                         Some(i) => s.click(i, ctrl, shift),
@@ -527,13 +563,17 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) 
                 let drag = with(|s| match s.press {
                     Some((px, py)) if (x - px).abs() > 4 || (y - py).abs() > 4 => {
                         s.press = None;
-                        s.hit(px, py).is_some()
+                        if s.text_tab { s.text_row_at(py).is_some() } else { s.hit(px, py).is_some() }
                     }
                     _ => false,
                 });
                 if drag == Some(true) {
                     let _ = ReleaseCapture();
-                    start_drag();
+                    if with(|s| s.text_tab) == Some(true) {
+                        start_text_drag();
+                    } else {
+                        start_drag();
+                    }
                 }
                 LRESULT(0)
             }
@@ -551,10 +591,13 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) 
                 LRESULT(0)
             }
             WM_LBUTTONDBLCLK => {
-                with(|s| s.open_file());
+                with(|s| if s.text_tab { s.text_copy() } else { s.open_file() });
                 LRESULT(0)
             }
             WM_RBUTTONUP => {
+                if with(|s| s.text_tab) == Some(true) {
+                    return LRESULT(0);
+                }
                 let (x, y) = lp_xy(lp);
                 with(|s| {
                     if let Some(i) = s.hit(x, y) {
@@ -571,6 +614,10 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) 
             WM_MOUSEWHEEL => {
                 let delta = (wp.0 >> 16) as u16 as i16;
                 with(|s| {
+                    if s.text_tab {
+                        s.text_move(if delta > 0 { -3 } else { 3 });
+                        return;
+                    }
                     s.scroll += if delta > 0 { -1 } else { 1 };
                     s.clamp_scroll();
                     s.redraw();
@@ -580,6 +627,14 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) 
             WM_KEYDOWN => {
                 let vk = VIRTUAL_KEY(wp.0 as u16);
                 let (ctrl, shift) = (key_down(VK_CONTROL), key_down(VK_SHIFT));
+                if with(|s| s.text_tab) == Some(true) {
+                    with(|s| s.text_key(vk, ctrl));
+                    return LRESULT(0);
+                }
+                if vk == VK_TAB {
+                    with(|s| s.set_tab(true));
+                    return LRESULT(0);
+                }
                 with(|s| match vk {
                     VK_ESCAPE => s.hide(),
                     VK_A if ctrl => {
@@ -601,8 +656,175 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) 
                 });
                 LRESULT(0)
             }
+            WM_CHAR => {
+                if let Some(c) = char::from_u32(wp.0 as u32) {
+                    // Printable characters and Backspace edit the search; Tab/Enter/Esc are keys.
+                    if !key_down(VK_CONTROL) && !c.is_control() || c == '\u{8}' {
+                        with(|s| if s.text_tab { s.text_char(c) });
+                    }
+                }
+                LRESULT(0)
+            }
             WM_DPICHANGED => LRESULT(0),
             _ => DefWindowProcW(hwnd, msg, wp, lp),
         }
+    }
+}
+
+// ! --- Text tab (M13) --- !
+
+impl Shelf {
+    fn text_row_h(&self) -> f32 {
+        40.0 * self.scale
+    }
+
+    /// Rows that fit under the header and the search line.
+    fn text_rows(&self) -> usize {
+        ((self.size.1 as f32 - self.header() as f32 - 34.0 * self.scale) / self.text_row_h()).max(1.0) as usize
+    }
+
+    fn refresh_texts(&mut self) {
+        self.texts = crate::texthist::view(&self.query);
+        self.tsel = self.tsel.min(self.texts.len().saturating_sub(1));
+        self.ttop = self.ttop.min(self.tsel);
+    }
+
+    fn set_tab(&mut self, text: bool) {
+        self.text_tab = text;
+        if text {
+            self.refresh_texts();
+        }
+        self.redraw();
+    }
+
+    /// Header tab rectangles: (shots, text), in client pixels.
+    fn tab_rects(&self) -> (Rect, Rect) {
+        let s = self.scale;
+        let h = self.header();
+        (Rect::new((8.0 * s) as i32, 0, (80.0 * s) as i32, h), Rect::new((84.0 * s) as i32, 0, (150.0 * s) as i32, h))
+    }
+
+    fn text_row_at(&self, y: i32) -> Option<usize> {
+        let top = self.header() as f32 + 34.0 * self.scale;
+        if (y as f32) < top {
+            return None;
+        }
+        let i = self.ttop + ((y as f32 - top) / self.text_row_h()) as usize;
+        (i < self.texts.len() && i < self.ttop + self.text_rows()).then_some(i)
+    }
+
+    fn text_move(&mut self, d: i32) {
+        if self.texts.is_empty() {
+            return;
+        }
+        self.tsel = (self.tsel as i32 + d).clamp(0, self.texts.len() as i32 - 1) as usize;
+        let rows = self.text_rows();
+        if self.tsel < self.ttop {
+            self.ttop = self.tsel;
+        } else if self.tsel >= self.ttop + rows {
+            self.ttop = self.tsel + 1 - rows;
+        }
+        self.redraw();
+    }
+
+    fn text_copy(&self) {
+        if let Some(e) = self.texts.get(self.tsel) {
+            crate::texthist::touch(&e.text);
+            clipboard::set_text(self.hwnd, &e.text);
+        }
+    }
+
+    fn text_key(&mut self, vk: VIRTUAL_KEY, ctrl: bool) {
+        match vk {
+            VK_ESCAPE => self.hide(),
+            VK_TAB => self.set_tab(false),
+            VK_UP => self.text_move(-1),
+            VK_DOWN => self.text_move(1),
+            VK_PRIOR => self.text_move(-(self.text_rows() as i32)),
+            VK_NEXT => self.text_move(self.text_rows() as i32),
+            VK_RETURN => self.text_copy(),
+            VK_C if ctrl => self.text_copy(),
+            VK_P if ctrl => {
+                if let Some(e) = self.texts.get(self.tsel) {
+                    crate::texthist::set_pinned(&e.text, !e.pinned);
+                    self.refresh_texts();
+                    self.redraw();
+                }
+            }
+            VK_DELETE => {
+                if let Some(e) = self.texts.get(self.tsel) {
+                    crate::texthist::delete(&e.text);
+                    self.refresh_texts();
+                    self.redraw();
+                }
+            }
+            _ => {}
+        }
+    }
+
+    fn text_char(&mut self, c: char) {
+        match c {
+            '\u{8}' => {
+                self.query.pop();
+            }
+            c if !c.is_control() => self.query.push(c),
+            _ => return,
+        }
+        self.tsel = 0;
+        self.ttop = 0;
+        self.refresh_texts();
+        self.redraw();
+    }
+
+    unsafe fn render_tabs(&self, rt: &ID2D1HwndRenderTarget, fmt: &IDWriteTextFormat, accent: &ID2D1SolidColorBrush, text: &ID2D1SolidColorBrush, dim: &ID2D1SolidColorBrush) {
+        let (a, b) = self.tab_rects();
+        let s = self.scale;
+        for (r, label, on) in [(a, "Снимки", !self.text_tab), (b, "Текст", self.text_tab)] {
+            let t: Vec<u16> = label.encode_utf16().collect();
+            let rr = D2D_RECT_F { left: r.l as f32 + 4.0 * s, top: 9.0 * s, right: r.r as f32, bottom: r.b as f32 };
+            unsafe {
+                rt.DrawText(&t, fmt, &rr, if on { text } else { dim }, D2D1_DRAW_TEXT_OPTIONS_NONE, DWRITE_MEASURING_MODE_NATURAL);
+                if on {
+                    rt.FillRectangle(&D2D_RECT_F { left: r.l as f32 + 4.0 * s, top: r.b as f32 - 3.0 * s, right: r.r as f32 - 8.0 * s, bottom: r.b as f32 - 1.0 * s }, accent);
+                }
+            }
+        }
+    }
+
+    unsafe fn render_text_tab(&self, rt: &ID2D1HwndRenderTarget, fmt: &IDWriteTextFormat, small: &IDWriteTextFormat, accent: &ID2D1SolidColorBrush, text: &ID2D1SolidColorBrush, dim: &ID2D1SolidColorBrush, sel: &ID2D1SolidColorBrush) {
+        let s = self.scale;
+        let w = self.size.0 as f32;
+        let top = self.header() as f32;
+        let draw = |t: &str, f: &IDWriteTextFormat, r: D2D_RECT_F, b: &ID2D1SolidColorBrush| {
+            let u: Vec<u16> = t.encode_utf16().collect();
+            unsafe { rt.DrawText(&u, f, &r, b, D2D1_DRAW_TEXT_OPTIONS_CLIP, DWRITE_MEASURING_MODE_NATURAL) };
+        };
+        let q = if self.query.is_empty() { "Поиск: начните печатать…".to_string() } else { format!("Поиск: {}▏", self.query) };
+        draw(&q, fmt, D2D_RECT_F { left: 12.0 * s, top: top + 6.0 * s, right: w, bottom: top + 30.0 * s }, if self.query.is_empty() { dim } else { text });
+        let y0 = top + 34.0 * s;
+        if self.texts.is_empty() {
+            draw("Нет записей", fmt, D2D_RECT_F { left: 12.0 * s, top: y0 + 8.0 * s, right: w, bottom: y0 + 30.0 * s }, dim);
+        }
+        let rh = self.text_row_h();
+        for (i, e) in self.texts.iter().enumerate().skip(self.ttop).take(self.text_rows()) {
+            let y = y0 + (i - self.ttop) as f32 * rh;
+            if i == self.tsel {
+                unsafe { rt.FillRectangle(&D2D_RECT_F { left: 2.0, top: y, right: w - 2.0, bottom: y + rh }, sel) };
+            }
+            let first = e.text.lines().find(|l| !l.trim().is_empty()).unwrap_or("").trim();
+            let pin = if e.pinned { "★ " } else { "" };
+            draw(&format!("{pin}{}", crate::clipkind::clip_chars(first, 120)), fmt, D2D_RECT_F { left: 12.0 * s, top: y + 3.0 * s, right: w - 12.0 * s, bottom: y + 22.0 * s }, if e.pinned { accent } else { text });
+            let meta = format!("{} · {} симв. · {}", if e.source.is_empty() { "—" } else { &e.source }, e.text.chars().count(), if e.pinned && !crate::texthist::template_fields(&e.text).is_empty() { "шаблон" } else { "" });
+            draw(&meta, small, D2D_RECT_F { left: 12.0 * s, top: y + 21.0 * s, right: w - 12.0 * s, bottom: y + 38.0 * s }, dim);
+        }
+    }
+}
+
+fn start_text_drag() {
+    let Some(text) = with(|s| s.texts.get(s.tsel).map(|e| e.text.clone())).flatten() else { return };
+    let mut dropped = false;
+    modal(|| dropped = crate::dragdrop::drag_text(&text));
+    if dropped {
+        with(|s| s.hide());
     }
 }

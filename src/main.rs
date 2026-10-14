@@ -25,6 +25,8 @@ mod record;
 mod settings;
 mod settings_model;
 mod shelf;
+mod texthist;
+mod textpick;
 
 use std::cell::RefCell;
 use std::path::Path;
@@ -66,6 +68,8 @@ pub const HK_KEYS: i32 = 8;
 pub const HK_BOARD: i32 = 9;
 pub const HK_REC_STOP: i32 = 10;
 pub const HK_CHIP: i32 = 11;
+pub const HK_TEXT_PICK: i32 = 12;
+pub const HK_TEXT_PAUSE: i32 = 13;
 
 struct App {
     hwnd: HWND,
@@ -134,6 +138,7 @@ fn main() {
         overlay::init(hwnd, cfg.capture.magnifier);
         shelf::init();
         board::init();
+        textpick::init();
         chip::init();
         settings::init();
         ink::init();
@@ -244,17 +249,17 @@ fn apply_config(cfg: &config::Config, old: Option<&config::Config>) {
     config::set_current(cfg);
     history::set_template(&cfg.save.filename);
     history::set_limits(cfg.history.max_items, cfg.history.max_mb);
-    let listen = |c: &config::Config| (c.history.watch_clipboard, c.clipboard_chip.enabled);
+    let listen = |c: &config::Config| (c.history.watch_clipboard, c.clipboard_chip.enabled, c.text_history.enabled);
     if old.map(listen) != Some(listen(cfg)) {
         let hwnd = APP.with(|a| a.borrow().as_ref().unwrap().hwnd);
-        clipwatch::set_enabled(hwnd, cfg.history.watch_clipboard, cfg.history.watch_clipboard || cfg.clipboard_chip.enabled);
+        clipwatch::set_enabled(hwnd, cfg.history.watch_clipboard, cfg.history.watch_clipboard || cfg.clipboard_chip.enabled || cfg.text_history.enabled);
     }
     if old.map(|o| o.autostart) != Some(cfg.autostart) {
         set_autostart(cfg.autostart);
     }
     overlay::set_magnifier(cfg.capture.magnifier);
     board::configure(cfg.board.opacity, config::parse_color(&cfg.board.background).unwrap_or(0x1E1E1E));
-    if old.map(|o| (&o.hotkeys, &o.ink, &o.board.hotkey, &o.dictation.hold, &o.record.stop, &o.clipboard_chip)) != Some((&cfg.hotkeys, &cfg.ink, &cfg.board.hotkey, &cfg.dictation.hold, &cfg.record.stop, &cfg.clipboard_chip)) {
+    if old.map(|o| (&o.hotkeys, &o.ink, &o.board.hotkey, &o.dictation.hold, &o.record.stop, &o.clipboard_chip, &o.text_history)) != Some((&cfg.hotkeys, &cfg.ink, &cfg.board.hotkey, &cfg.dictation.hold, &cfg.record.stop, &cfg.clipboard_chip, &cfg.text_history)) {
         register_hotkeys(cfg);
     }
     sync_ink_features();
@@ -308,6 +313,8 @@ fn register_hotkeys(cfg: &config::Config) {
         (HK_BOARD, "board", &cfg.board.hotkey),
         (HK_REC_STOP, "record stop", &cfg.record.stop),
         (HK_CHIP, "clipboard chip", &cfg.clipboard_chip.toggle),
+        (HK_TEXT_PICK, "text picker", &cfg.text_history.picker),
+        (HK_TEXT_PAUSE, "text history pause", &cfg.text_history.pause),
     ] {
         unsafe {
             let _ = UnregisterHotKey(Some(hwnd), id);
@@ -390,6 +397,14 @@ fn on_hotkey(id: i32) {
         HK_SHELF => shelf::toggle(),
         HK_BOARD => board::toggle(),
         HK_REC_STOP => stop_recording(),
+        HK_TEXT_PICK => textpick::toggle(),
+        HK_TEXT_PAUSE => {
+            use std::sync::atomic::Ordering;
+            let paused = !texthist::PAUSED.fetch_xor(true, Ordering::Relaxed);
+            log::info!("text history paused = {paused}");
+            let text = if paused { "История текста: пауза" } else { "История текста: запись" };
+            chip::show(chip::Content::Notice(text.into()), cursor());
+        }
         HK_CHIP => {
             use std::sync::atomic::Ordering;
             let on = !chip::ENABLED.fetch_xor(true, Ordering::Relaxed);
@@ -703,7 +718,7 @@ pub fn ocr_to_clipboard(img: std::sync::Arc<clipboard::Image>) {
     });
 }
 
-fn send_paste() {
+pub fn send_paste() {
     let key = |vk: VIRTUAL_KEY, up: bool| INPUT {
         r#type: INPUT_KEYBOARD,
         Anonymous: INPUT_0 { ki: KEYBDINPUT { wVk: vk, dwFlags: if up { KEYEVENTF_KEYUP } else { KEYBD_EVENT_FLAGS(0) }, ..Default::default() } },
