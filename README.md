@@ -51,3 +51,9 @@ cargo test
 | Ink | `1`–`8` while drawing | Color |
 | Global | `Ctrl+Alt+Backspace` | Clear screen ink |
 | Global | `Ctrl+Alt+D` | Sticky draw mode (left button draws, `Esc` exits) |
+| Global | Hold `Ctrl`+`Caps Lock` | Laser pointer |
+| Ink | Click while holding `Caps Lock` (sticky mode: `Ctrl`+click) | Numbered marker |
+| Global | `Ctrl+Alt+S` | Spotlight (wheel: radius, `Esc` exits) |
+| Global | `Ctrl+Alt+Z` | Zoom (wheel: level, `Esc` or right click exits) |
+| Global | `Ctrl+Alt+C` | Toggle click rings |
+| Global | `Ctrl+Alt+K` | Toggle pressed-keys overlay |

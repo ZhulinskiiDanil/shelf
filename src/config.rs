@@ -27,6 +27,14 @@ pub struct Ink {
     /// Delay before a stroke starts to fade, in milliseconds.
     pub fade_ms: u64,
     pub width: f32,
+    // Explanation tools. The laser is the hold key pressed together with Ctrl.
+    pub spotlight: String,
+    pub zoom: String,
+    pub click_rings_toggle: String,
+    pub keys_toggle: String,
+    /// Initial state of click rings and the pressed-keys plate.
+    pub click_rings: bool,
+    pub show_keys: bool,
 }
 
 impl Default for Ink {
@@ -38,6 +46,12 @@ impl Default for Ink {
             clear: "Ctrl+Alt+Backspace".into(),
             fade_ms: 2500,
             width: 4.0,
+            spotlight: "Ctrl+Alt+S".into(),
+            zoom: "Ctrl+Alt+Z".into(),
+            click_rings_toggle: "Ctrl+Alt+C".into(),
+            keys_toggle: "Ctrl+Alt+K".into(),
+            click_rings: false,
+            show_keys: false,
         }
     }
 }
@@ -218,6 +232,14 @@ clear = "Ctrl+Alt+Backspace"
 # Strokes fade this many milliseconds after release
 fade_ms = 2500
 width = 4.0
+# Explanation tools: hold Ctrl+<hold key> for the laser pointer,
+# click while drawing for numbered markers. Esc leaves spotlight and zoom.
+spotlight = "Ctrl+Alt+S"
+zoom = "Ctrl+Alt+Z"
+click_rings_toggle = "Ctrl+Alt+C"
+keys_toggle = "Ctrl+Alt+K"
+click_rings = false
+show_keys = false
 "#;
 
 pub fn app_dir() -> PathBuf {

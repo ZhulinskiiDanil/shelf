@@ -64,6 +64,9 @@ unsafe extern "system" fn proc(code: i32, wp: WPARAM, lp: LPARAM) -> LRESULT {
             if ink_key(k.vkCode, down) {
                 return LRESULT(1);
             }
+            if down && FEATURES.load(Ordering::Relaxed) & F_KEYS != 0 {
+                post_ink(INK_KEY, (k.vkCode | mods_now() << 16) as isize);
+            }
             let vk = CAPTURE_VK.load(Ordering::Relaxed);
             if vk != 0 && k.vkCode == vk {
                 let m = wp.0 as u32;
@@ -95,6 +98,28 @@ pub const INK_COLOR: usize = 4; // LPARAM = palette index
 pub const INK_STICKY_DOWN: usize = 5;
 pub const INK_STICKY_UP: usize = 6;
 pub const INK_STICKY_OFF: usize = 7;
+pub const INK_LASER_DOWN: usize = 8;
+pub const INK_LASER_UP: usize = 9;
+pub const INK_MARKER: usize = 10; // LPARAM = packed (x, y)
+pub const INK_CLICK: usize = 11; // LPARAM = packed (x, y)
+pub const INK_WHEEL: usize = 12; // LPARAM = 1 up, 0 down
+pub const INK_ZOOM_OFF: usize = 13;
+pub const INK_KEY: usize = 14; // LPARAM = vk | mods << 16
+
+/// Ink features that need mouse or key events (see `set_features`).
+pub const F_SPOT: u32 = 1;
+pub const F_ZOOM: u32 = 2;
+pub const F_RINGS: u32 = 4;
+pub const F_KEYS: u32 = 8;
+static FEATURES: AtomicU32 = AtomicU32::new(0);
+/// The current hold is the laser (hold key pressed together with Ctrl).
+static LASER: AtomicBool = AtomicBool::new(false);
+static SWALLOW_RBUTTON_UP: AtomicBool = AtomicBool::new(false);
+
+pub fn set_features(bits: u32) {
+    FEATURES.store(bits, Ordering::Relaxed);
+    update_mouse_hook();
+}
 
 static INK_MSG: AtomicU32 = AtomicU32::new(0);
 /// Keyboard hold key (vk), or 0 when the hold control is a mouse X button.
@@ -143,7 +168,10 @@ fn post_ink(kind: usize, lp: isize) {
 
 /// The mouse hook is only installed while it is needed (it touches every mouse event system-wide).
 pub fn update_mouse_hook() {
-    let need = HOLD_XBUTTON.load(Ordering::Relaxed) != 0 || HOLDING.load(Ordering::Relaxed) || STICKY.load(Ordering::Relaxed);
+    let need = HOLD_XBUTTON.load(Ordering::Relaxed) != 0
+        || HOLDING.load(Ordering::Relaxed)
+        || STICKY.load(Ordering::Relaxed)
+        || FEATURES.load(Ordering::Relaxed) & (F_SPOT | F_ZOOM | F_RINGS) != 0;
     let t = HOOK_THREAD.load(Ordering::Relaxed);
     if t != 0 {
         unsafe {
@@ -171,11 +199,13 @@ fn ink_key(vk: u32, down: bool) -> bool {
     if hold != 0 && vk == hold {
         let was = HOLDING.swap(down, Ordering::Relaxed);
         if down && !was {
+            let laser = unsafe { GetAsyncKeyState(VK_CONTROL.0 as i32) } < 0;
+            LASER.store(laser, Ordering::Relaxed);
             update_mouse_hook();
-            post_ink(INK_HOLD_DOWN, 0);
+            post_ink(if laser { INK_LASER_DOWN } else { INK_HOLD_DOWN }, 0);
         } else if !down && was {
             update_mouse_hook();
-            post_ink(INK_HOLD_UP, 0);
+            post_ink(if LASER.load(Ordering::Relaxed) { INK_LASER_UP } else { INK_HOLD_UP }, 0);
         }
         return true;
     }
@@ -186,7 +216,9 @@ fn ink_key(vk: u32, down: bool) -> bool {
         }
         return true;
     }
-    if STICKY.load(Ordering::Relaxed) && vk == VK_ESCAPE.0 as u32 {
+    // Esc leaves sticky mode, spotlight and zoom (INK_STICKY_OFF means "ink Esc").
+    let modal = STICKY.load(Ordering::Relaxed) || FEATURES.load(Ordering::Relaxed) & (F_SPOT | F_ZOOM) != 0;
+    if modal && vk == VK_ESCAPE.0 as u32 {
         if down {
             post_ink(INK_STICKY_OFF, 0);
         }
@@ -202,10 +234,13 @@ unsafe extern "system" fn mouse_proc(code: i32, wp: WPARAM, lp: LPARAM) -> LRESU
             let msg = wp.0 as u32;
             let xb = HOLD_XBUTTON.load(Ordering::Relaxed);
             let sticky = STICKY.load(Ordering::Relaxed);
+            let holding = HOLDING.load(Ordering::Relaxed);
+            let f = FEATURES.load(Ordering::Relaxed);
+            let pt = pack(m.pt.x, m.pt.y);
             match msg {
                 WM_MOUSEMOVE => {
-                    if HOLDING.load(Ordering::Relaxed) || sticky {
-                        post_ink(INK_MOVE, pack(m.pt.x, m.pt.y));
+                    if holding || sticky || f & (F_SPOT | F_ZOOM) != 0 {
+                        post_ink(INK_MOVE, pt);
                     }
                 }
                 WM_XBUTTONDOWN | WM_XBUTTONUP if xb != 0 && (m.mouseData >> 16) == xb => {
@@ -216,12 +251,37 @@ unsafe extern "system" fn mouse_proc(code: i32, wp: WPARAM, lp: LPARAM) -> LRESU
                     }
                     return LRESULT(1);
                 }
-                WM_LBUTTONDOWN if sticky => {
-                    post_ink(INK_STICKY_DOWN, pack(m.pt.x, m.pt.y));
+                WM_LBUTTONDOWN | WM_LBUTTONUP => {
+                    let down = msg == WM_LBUTTONDOWN;
+                    if down && f & F_RINGS != 0 {
+                        post_ink(INK_CLICK, pt);
+                    }
+                    let ctrl = GetAsyncKeyState(VK_CONTROL.0 as i32) < 0;
+                    if holding && !LASER.load(Ordering::Relaxed) || sticky && ctrl {
+                        // Numbered marker; the click does not reach the window below.
+                        if down {
+                            post_ink(INK_MARKER, pt);
+                        }
+                        return LRESULT(1);
+                    }
+                    if sticky {
+                        post_ink(if down { INK_STICKY_DOWN } else { INK_STICKY_UP }, pt);
+                        return LRESULT(1);
+                    }
+                    if f & F_ZOOM != 0 {
+                        return LRESULT(1); // zoomed image is a picture; do not click blindly below it
+                    }
+                }
+                WM_RBUTTONDOWN if f & F_ZOOM != 0 => {
+                    SWALLOW_RBUTTON_UP.store(true, Ordering::Relaxed);
+                    post_ink(INK_ZOOM_OFF, 0);
                     return LRESULT(1);
                 }
-                WM_LBUTTONUP if sticky => {
-                    post_ink(INK_STICKY_UP, 0);
+                WM_RBUTTONUP if SWALLOW_RBUTTON_UP.swap(false, Ordering::Relaxed) => return LRESULT(1),
+                WM_RBUTTONDOWN if f & F_RINGS != 0 => post_ink(INK_CLICK, pt),
+                WM_MOUSEWHEEL if f & (F_SPOT | F_ZOOM) != 0 => {
+                    let delta = (m.mouseData >> 16) as u16 as i16;
+                    post_ink(INK_WHEEL, (delta > 0) as isize);
                     return LRESULT(1);
                 }
                 _ => {}

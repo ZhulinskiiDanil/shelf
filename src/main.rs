@@ -6,6 +6,7 @@ mod clipwatch;
 mod clipboard;
 mod config;
 mod dragdrop;
+mod explain;
 mod geom;
 mod history;
 mod hook;
@@ -44,6 +45,10 @@ const MENU_EXIT: usize = 3;
 pub const HK_SHELF: i32 = 2;
 pub const HK_INK_STICKY: i32 = 3;
 pub const HK_INK_CLEAR: i32 = 4;
+pub const HK_SPOTLIGHT: i32 = 5;
+pub const HK_ZOOM: i32 = 6;
+pub const HK_RINGS: i32 = 7;
+pub const HK_KEYS: i32 = 8;
 
 struct App {
     hwnd: HWND,
@@ -221,6 +226,7 @@ fn apply_config(cfg: &config::Config, old: Option<&config::Config>) {
     if old.map(|o| (&o.hotkeys, &o.ink)) != Some((&cfg.hotkeys, &cfg.ink)) {
         register_hotkeys(cfg);
     }
+    sync_ink_features();
 }
 
 fn register_hotkeys(cfg: &config::Config) {
@@ -242,11 +248,18 @@ fn register_hotkeys(cfg: &config::Config) {
     ink::with(|i| {
         i.fade_delay = std::time::Duration::from_millis(cfg.ink.fade_ms);
         i.width = cfg.ink.width.clamp(1.0, 40.0);
+        // Runs when the [ink] section changes: the config is the source of truth again.
+        i.rings_on = cfg.ink.click_rings;
+        i.keys_on = cfg.ink.show_keys;
     });
     for (id, name, spec) in [
         (HK_SHELF, "shelf", &cfg.hotkeys.shelf),
         (HK_INK_STICKY, "ink sticky", &cfg.ink.sticky),
         (HK_INK_CLEAR, "ink clear", &cfg.ink.clear),
+        (HK_SPOTLIGHT, "spotlight", &cfg.ink.spotlight),
+        (HK_ZOOM, "zoom", &cfg.ink.zoom),
+        (HK_RINGS, "click rings", &cfg.ink.click_rings_toggle),
+        (HK_KEYS, "show keys", &cfg.ink.keys_toggle),
     ] {
         unsafe {
             let _ = UnregisterHotKey(Some(hwnd), id);
@@ -326,6 +339,24 @@ fn on_hotkey(id: i32) {
         HK_INK_STICKY => set_ink_sticky(!hook::STICKY.load(std::sync::atomic::Ordering::Relaxed)),
         HK_INK_CLEAR => {
             ink::with(|i| i.clear());
+        }
+        HK_SPOTLIGHT => {
+            let (x, y) = cursor();
+            ink::with(|i| i.toggle_spotlight(x, y));
+            sync_ink_features();
+        }
+        HK_ZOOM => {
+            let (x, y) = cursor();
+            ink::with(|i| i.toggle_zoom(x, y));
+            sync_ink_features();
+        }
+        HK_RINGS => {
+            ink::with(|i| i.rings_on = !i.rings_on);
+            sync_ink_features();
+        }
+        HK_KEYS => {
+            ink::with(|i| i.keys_on = !i.keys_on);
+            sync_ink_features();
         }
         _ => {}
     }
@@ -448,7 +479,7 @@ fn on_ink(kind: usize, lp: LPARAM) {
         }
         hook::INK_MOVE => {
             let (x, y) = hook::unpack(lp);
-            ink::with(|i| i.add_point(x, y));
+            ink::with(|i| i.on_move(x, y));
         }
         hook::INK_HOLD_UP | hook::INK_STICKY_UP => {
             ink::with(|i| i.end_with(keep_held()));
@@ -457,7 +488,48 @@ fn on_ink(kind: usize, lp: LPARAM) {
             let idx = (lp.0 as usize).min(annot::PALETTE.len() - 1);
             ink::with(|i| i.set_color(annot::PALETTE[idx]));
         }
-        hook::INK_STICKY_OFF => set_ink_sticky(false),
+        hook::INK_STICKY_OFF => {
+            // Esc: leave every modal ink mode.
+            if hook::STICKY.load(std::sync::atomic::Ordering::Relaxed) {
+                set_ink_sticky(false);
+            }
+            ink::with(|i| i.exit_modes());
+            sync_ink_features();
+        }
+        hook::INK_ZOOM_OFF => {
+            ink::with(|i| i.exit_modes());
+            sync_ink_features();
+        }
+        hook::INK_LASER_DOWN => {
+            let (x, y) = cursor();
+            ink::with(|i| i.laser(true, x, y));
+        }
+        hook::INK_LASER_UP => {
+            ink::with(|i| i.laser(false, 0, 0));
+        }
+        hook::INK_MARKER => {
+            let (x, y) = hook::unpack(lp);
+            ink::with(|i| i.marker(x, y));
+        }
+        hook::INK_CLICK => {
+            let (x, y) = hook::unpack(lp);
+            ink::with(|i| i.ring(x, y));
+        }
+        hook::INK_WHEEL => {
+            ink::with(|i| i.wheel(lp.0 != 0));
+        }
+        hook::INK_KEY => {
+            let (vk, mods) = ((lp.0 & 0xFFFF) as u32, (lp.0 >> 16) as u32 & 0xF);
+            if let Some(c) = explain::format_combo(vk, mods) {
+                ink::with(|i| i.key(c));
+            }
+        }
         _ => {}
     }
+}
+
+/// Tells the hook which ink features need mouse/key events right now.
+fn sync_ink_features() {
+    let bits = ink::with(|i| i.feature_bits()).unwrap_or(0);
+    hook::set_features(bits);
 }

@@ -3,6 +3,7 @@
 //! It is a normal DWM-composed window, so screen sharing (Discord, OBS) sees it.
 
 use crate::annot;
+use crate::explain;
 use crate::geom::Rect;
 use std::cell::RefCell;
 use std::time::{Duration, Instant};
@@ -10,6 +11,7 @@ use windows::Win32::Foundation::*;
 use windows::Win32::Graphics::Direct2D::Common::*;
 use windows::Win32::Graphics::Direct2D::*;
 use windows::Win32::Graphics::Direct3D::*;
+use windows::Win32::Graphics::DirectWrite::*;
 use windows::Win32::Graphics::Direct3D11::*;
 use windows::Win32::Graphics::DirectComposition::*;
 use windows::Win32::Graphics::Dxgi::Common::*;
@@ -52,6 +54,15 @@ struct Gpu {
     _target: IDCompositionTarget,
     _visual: IDCompositionVisual,
     stroke_style: ID2D1StrokeStyle,
+    res: annot::Res,
+}
+
+struct Zoom {
+    bmp: ID2D1Bitmap1,
+    /// Frozen frame bounds (virtual screen) and the monitor being zoomed.
+    frame: Rect,
+    mon: Rect,
+    level: f32,
 }
 
 pub struct Ink {
@@ -68,6 +79,17 @@ pub struct Ink {
     /// Sticky mode: a thin frame around every monitor shows that clicks draw.
     pub sticky: bool,
     render_pending: bool,
+    // Explanation tools (M6)
+    cursor: (i32, i32),
+    laser: bool,
+    trail: Vec<(f32, f32, Instant)>,
+    spot: Option<f32>,
+    zoom: Option<Zoom>,
+    markers: Vec<annot::Shape>,
+    rings: Vec<(f32, f32, Instant)>,
+    keys: explain::KeyLog,
+    pub rings_on: bool,
+    pub keys_on: bool,
 }
 
 thread_local! {
@@ -121,6 +143,16 @@ pub fn init() {
             animating: false,
             sticky: false,
             render_pending: false,
+            cursor: (0, 0),
+            laser: false,
+            trail: Vec::new(),
+            spot: None,
+            zoom: None,
+            markers: Vec::new(),
+            rings: Vec::new(),
+            keys: explain::KeyLog::default(),
+            rings_on: false,
+            keys_on: false,
         };
         INK.with(|i| *i.borrow_mut() = Some(ink));
     }
@@ -174,7 +206,8 @@ fn create_gpu(hwnd: HWND, w: u32, h: u32) -> Result<Gpu> {
         };
         let base: ID2D1Factory = d2f.cast()?;
         let stroke_style = base.CreateStrokeStyle(&sp, None)?;
-        Ok(Gpu { swap, dc, _dcomp: dcomp, _target: target, _visual: visual, stroke_style })
+        let res = annot::Res::new(&base);
+        Ok(Gpu { swap, dc, _dcomp: dcomp, _target: target, _visual: visual, stroke_style, res })
     }
 }
 
@@ -245,7 +278,126 @@ impl Ink {
     pub fn clear(&mut self) {
         self.strokes.clear();
         self.current = None;
+        self.markers.clear();
         self.request_render();
+    }
+
+    // ! --- Explanation tools --- !
+
+    /// Every mouse move from the hook while any ink feature listens.
+    pub fn on_move(&mut self, x: i32, y: i32) {
+        self.cursor = (x, y);
+        if self.laser {
+            self.trail.push((x as f32, y as f32, Instant::now()));
+        }
+        if self.current.is_some() {
+            self.add_point(x, y);
+        } else if self.laser || self.spot.is_some() || self.zoom.is_some() {
+            self.request_render();
+        }
+    }
+
+    pub fn laser(&mut self, on: bool, x: i32, y: i32) {
+        self.laser = on;
+        self.cursor = (x, y);
+        if on {
+            self.trail.push((x as f32, y as f32, Instant::now()));
+        }
+        self.request_render();
+    }
+
+    pub fn toggle_spotlight(&mut self, x: i32, y: i32) -> bool {
+        self.cursor = (x, y);
+        self.spot = if self.spot.is_some() { None } else { Some(160.0 * self.scale_at(x, y)) };
+        self.request_render();
+        self.spot.is_some()
+    }
+
+    pub fn toggle_zoom(&mut self, x: i32, y: i32) -> bool {
+        self.cursor = (x, y);
+        if self.zoom.take().is_some() {
+            self.request_render();
+            return false;
+        }
+        if !self.ensure_gpu() {
+            return false;
+        }
+        // Freeze the screen (without the ink layer, which GDI does not see) and zoom into it.
+        let mut frame = None;
+        if !crate::capture::grab(&mut frame) {
+            return false;
+        }
+        let f = frame.unwrap();
+        let mon = crate::capture::monitors().into_iter().map(|m| m.0).find(|r| r.contains(x, y)).unwrap_or(f.bounds);
+        let props = D2D1_BITMAP_PROPERTIES1 {
+            pixelFormat: D2D1_PIXEL_FORMAT { format: DXGI_FORMAT_B8G8R8A8_UNORM, alphaMode: D2D1_ALPHA_MODE_IGNORE },
+            dpiX: 96.0,
+            dpiY: 96.0,
+            ..Default::default()
+        };
+        let g = self.gpu.as_ref().unwrap();
+        let size = D2D_SIZE_U { width: f.bounds.w() as u32, height: f.bounds.h() as u32 };
+        let bmp = unsafe { g.dc.CreateBitmap(size, Some(f.pixels as _), f.stride() as u32, &props) };
+        match bmp {
+            Ok(bmp) => self.zoom = Some(Zoom { bmp, frame: f.bounds, mon, level: 2.0 }),
+            Err(e) => log::error!("zoom bitmap: {e}"),
+        }
+        self.request_render();
+        self.zoom.is_some()
+    }
+
+    pub fn wheel(&mut self, up: bool) {
+        if let Some(z) = self.zoom.as_mut() {
+            z.level = (z.level * if up { 1.25 } else { 0.8 }).clamp(1.25, 12.0);
+        } else if let Some(r) = self.spot.as_mut() {
+            *r = (*r * if up { 1.15 } else { 0.87 }).clamp(30.0, 2000.0);
+        }
+        self.request_render();
+    }
+
+    pub fn marker(&mut self, x: i32, y: i32) {
+        let n = self.markers.len() as u32 + 1;
+        let width = self.width;
+        self.markers.push(annot::Shape { kind: annot::Kind::Number((x as f32, y as f32), n), color: self.color, width });
+        self.request_render();
+    }
+
+    pub fn ring(&mut self, x: i32, y: i32) {
+        self.rings.push((x as f32, y as f32, Instant::now()));
+        self.request_render();
+    }
+
+    pub fn key(&mut self, combo: String) {
+        self.keys.push(combo, Instant::now());
+        self.request_render();
+    }
+
+    pub fn exit_modes(&mut self) {
+        self.spot = None;
+        self.zoom = None;
+        self.request_render();
+    }
+
+    pub fn feature_bits(&self) -> u32 {
+        use crate::hook::{F_KEYS, F_RINGS, F_SPOT, F_ZOOM};
+        let mut b = 0;
+        if self.spot.is_some() {
+            b |= F_SPOT;
+        }
+        if self.zoom.is_some() {
+            b |= F_ZOOM;
+        }
+        if self.rings_on {
+            b |= F_RINGS;
+        }
+        if self.keys_on {
+            b |= F_KEYS;
+        }
+        b
+    }
+
+    fn scale_at(&self, x: i32, y: i32) -> f32 {
+        crate::geom::scale_at(&crate::capture::monitors(), x, y)
     }
 
     pub fn set_color(&mut self, c: u32) {
@@ -277,9 +429,23 @@ impl Ink {
 
     pub fn render(&mut self) {
         self.render_pending = false;
+        let now = Instant::now();
         let fading = self.prune();
-        let empty = self.strokes.is_empty() && self.current.is_none() && !self.sticky;
-        self.set_animating(fading);
+        explain::trim_trail(&mut self.trail, now);
+        self.rings.retain(|r| now.duration_since(r.2) < explain::RING_LIFE);
+        self.keys.prune(now);
+        let animating = fading || self.laser || !self.trail.is_empty() || !self.rings.is_empty() || !self.keys.entries.is_empty();
+        let empty = self.strokes.is_empty()
+            && self.current.is_none()
+            && !self.sticky
+            && self.markers.is_empty()
+            && self.trail.is_empty()
+            && !self.laser
+            && self.spot.is_none()
+            && self.zoom.is_none()
+            && self.rings.is_empty()
+            && self.keys.entries.is_empty();
+        self.set_animating(animating);
         if empty {
             self.set_shown(false);
             return;
@@ -288,16 +454,38 @@ impl Ink {
             return;
         }
         let g = self.gpu.as_ref().unwrap();
-        let now = Instant::now();
         let o = (self.bounds.l as f32, self.bounds.t as f32);
+        let lr = |l: f32, t: f32, r: f32, b: f32| D2D_RECT_F { left: l - o.0, top: t - o.1, right: r - o.0, bottom: b - o.1 };
         unsafe {
-            g.dc.BeginDraw();
-            g.dc.Clear(Some(&D2D1_COLOR_F { r: 0.0, g: 0.0, b: 0.0, a: 0.0 }));
+            let dc = &g.dc;
+            let brush = |c: u32, a: f32| dc.CreateSolidColorBrush(&annot::rgba(c, a), None).ok();
+            dc.BeginDraw();
+            dc.Clear(Some(&D2D1_COLOR_F { r: 0.0, g: 0.0, b: 0.0, a: 0.0 }));
+            // Zoom: the frozen frame, magnified onto its monitor.
+            if let Some(z) = &self.zoom {
+                let src = explain::zoom_src(&z.mon, self.cursor, z.level);
+                let s = D2D_RECT_F { left: src.0 - z.frame.l as f32, top: src.1 - z.frame.t as f32, right: src.2 - z.frame.l as f32, bottom: src.3 - z.frame.t as f32 };
+                let d = lr(z.mon.l as f32, z.mon.t as f32, z.mon.r as f32, z.mon.b as f32);
+                dc.DrawBitmap(&z.bmp, Some(&d), 1.0, D2D1_INTERPOLATION_MODE_LINEAR, Some(&s), None);
+            }
+            // Spotlight: dim everything except a circle around the cursor.
+            if let (Some(r), Ok(f)) = (self.spot, dc.GetFactory()) {
+                let full = D2D_RECT_F { left: 0.0, top: 0.0, right: self.bounds.w() as f32, bottom: self.bounds.h() as f32 };
+                let c = Vector2::new(self.cursor.0 as f32 - o.0, self.cursor.1 as f32 - o.1);
+                if let (Ok(rect), Ok(circle), Some(b)) =
+                    (f.CreateRectangleGeometry(&full), f.CreateEllipseGeometry(&D2D1_ELLIPSE { point: c, radiusX: r, radiusY: r }), brush(0, 0.65))
+                {
+                    let parts = [Some(rect.cast::<ID2D1Geometry>().unwrap()), Some(circle.cast::<ID2D1Geometry>().unwrap())];
+                    if let Ok(group) = f.CreateGeometryGroup(D2D1_FILL_MODE_ALTERNATE, &parts) {
+                        dc.FillGeometry(&group, &b, None);
+                    }
+                }
+            }
             if self.sticky {
-                if let Ok(b) = g.dc.CreateSolidColorBrush(&annot::rgba(self.color, 0.9), None) {
+                if let Some(b) = brush(self.color, 0.9) {
                     for (m, _) in crate::capture::monitors() {
-                        let r = D2D_RECT_F { left: (m.l - self.bounds.l) as f32 + 2.0, top: (m.t - self.bounds.t) as f32 + 2.0, right: (m.r - self.bounds.l) as f32 - 2.0, bottom: (m.b - self.bounds.t) as f32 - 2.0 };
-                        g.dc.DrawRectangle(&r, &b, 4.0, None);
+                        let r = lr(m.l as f32 + 2.0, m.t as f32 + 2.0, m.r as f32 - 2.0, m.b as f32 - 2.0);
+                        dc.DrawRectangle(&r, &b, 4.0, None);
                     }
                 }
             }
@@ -306,15 +494,64 @@ impl Ink {
                     (false, Some(e)) => fade_alpha(now - e, self.fade_delay, FADE_TIME),
                     _ => 1.0,
                 };
-                draw_stroke(&g.dc, &g.stroke_style, s, a, o);
+                draw_stroke(dc, &g.stroke_style, s, a, o);
             }
-            if g.dc.EndDraw(None, None).is_err() {
+            annot::draw(dc, &g.res, &self.markers, o);
+            // Click rings: grow and fade.
+            for (x, y, t) in &self.rings {
+                let k = now.duration_since(*t).as_secs_f32() / explain::RING_LIFE.as_secs_f32();
+                let scale = self.scale_at(*x as i32, *y as i32);
+                if let Some(b) = brush(0xFFC107, 1.0 - k) {
+                    let e = D2D1_ELLIPSE { point: Vector2::new(x - o.0, y - o.1), radiusX: (10.0 + 25.0 * k) * scale, radiusY: (10.0 + 25.0 * k) * scale };
+                    dc.DrawEllipse(&e, &b, 3.0 * scale, None);
+                }
+            }
+            // Laser: a fading red trail with a bright head.
+            if let Some(last) = self.trail.last().copied() {
+                for w in self.trail.windows(2) {
+                    let age = now.duration_since(w[1].2).as_secs_f32() / explain::LASER_LIFE.as_secs_f32();
+                    if let Some(b) = brush(0xFF1744, (1.0 - age).clamp(0.0, 1.0) * 0.85) {
+                        dc.DrawLine(Vector2::new(w[0].0 - o.0, w[0].1 - o.1), Vector2::new(w[1].0 - o.0, w[1].1 - o.1), &b, 6.0 * (1.0 - age * 0.6), &g.stroke_style);
+                    }
+                }
+                if self.laser {
+                    let p = Vector2::new(last.0 - o.0, last.1 - o.1);
+                    if let (Some(glow), Some(core)) = (brush(0xFF1744, 0.35), brush(0xFF5252, 1.0)) {
+                        dc.FillEllipse(&D2D1_ELLIPSE { point: p, radiusX: 14.0, radiusY: 14.0 }, &glow);
+                        dc.FillEllipse(&D2D1_ELLIPSE { point: p, radiusX: 6.0, radiusY: 6.0 }, &core);
+                    }
+                }
+            }
+            // Pressed keys: a plate in the bottom-right corner of the primary monitor.
+            if !self.keys.entries.is_empty() {
+                let mons = crate::capture::monitors();
+                let m = mons.iter().map(|m| m.0).find(|r| r.contains(0, 0)).unwrap_or(self.bounds);
+                let scale = self.scale_at(m.l, m.t);
+                if let (Some(fmt), Some(bg), Some(fg)) = (g.res.text_format(18.0 * scale), brush(0x202020, 0.85), brush(0xFFFFFF, 1.0)) {
+                    let h = 34.0 * scale;
+                    let gap = 6.0 * scale;
+                    let n = self.keys.entries.len();
+                    for (i, e) in self.keys.entries.iter().enumerate() {
+                        let text = explain::KeyLog::label(e);
+                        let w = (12.0 * text.chars().count() as f32 + 24.0) * scale;
+                        let b = m.b as f32 - 40.0 * scale - (n - 1 - i) as f32 * (h + gap);
+                        let r = lr(m.r as f32 - 40.0 * scale - w, b - h, m.r as f32 - 40.0 * scale, b);
+                        let rr = D2D1_ROUNDED_RECT { rect: r, radiusX: 6.0 * scale, radiusY: 6.0 * scale };
+                        dc.FillRoundedRectangle(&rr, &bg);
+                        let _ = fmt.SetTextAlignment(DWRITE_TEXT_ALIGNMENT_CENTER);
+                        let _ = fmt.SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
+                        let t: Vec<u16> = text.encode_utf16().collect();
+                        dc.DrawText(&t, &fmt, &r, &fg, D2D1_DRAW_TEXT_OPTIONS_NONE, DWRITE_MEASURING_MODE_NATURAL);
+                    }
+                }
+            }
+            if dc.EndDraw(None, None).is_err() {
                 self.gpu = None;
+                self.zoom = None; // its bitmap belonged to the lost device
                 return;
             }
             // No vsync wait: the UI thread must keep draining mouse points; DWM composes at refresh rate anyway.
-            let hr = g.swap.Present(0, DXGI_PRESENT(0));
-            log::debug!("ink present: {} strokes, {hr:?}", self.strokes.len() + self.current.is_some() as usize);
+            let _ = g.swap.Present(0, DXGI_PRESENT(0));
         }
         self.set_shown(true);
     }
