@@ -13,6 +13,28 @@ pub struct Config {
     pub history: History,
     pub ink: Ink,
     pub board: Board,
+    pub dictation: Dictation,
+}
+
+#[derive(Debug, Clone, Deserialize, PartialEq)]
+#[serde(default)]
+pub struct Dictation {
+    /// Hold to record; release to transcribe.
+    pub hold: String,
+    /// Path to a ggml whisper model; empty = %APPDATA%Shelfmodelsggml-base.bin.
+    pub model: String,
+    /// "auto", "ru" or "en".
+    pub language: String,
+    /// Paste right away (Ctrl+V) instead of only copying.
+    pub paste: bool,
+    /// Unload the model after this many idle minutes.
+    pub unload_after_min: u64,
+}
+
+impl Default for Dictation {
+    fn default() -> Self {
+        Self { hold: "Ctrl+Alt+V".into(), model: String::new(), language: "auto".into(), paste: false, unload_after_min: 5 }
+    }
 }
 
 #[derive(Debug, Clone, Deserialize, PartialEq)]
@@ -195,7 +217,7 @@ pub struct Hotkeys {
 
 impl Default for Config {
     fn default() -> Self {
-        Self { log_level: "info".into(), autostart: false, hotkeys: Hotkeys::default(), capture: Capture::default(), save: Save::default(), tools: Tools::default(), history: History::default(), ink: Ink::default(), board: Board::default() }
+        Self { log_level: "info".into(), autostart: false, hotkeys: Hotkeys::default(), capture: Capture::default(), save: Save::default(), tools: Tools::default(), history: History::default(), ink: Ink::default(), board: Board::default(), dictation: Dictation::default() }
     }
 }
 
@@ -272,6 +294,17 @@ show_keys = false
 hotkey = "Ctrl+Alt+B"
 opacity = 0.85
 background = "#1E1E1E"
+
+# Hold-to-talk dictation with a local whisper model (nothing is downloaded automatically)
+[dictation]
+hold = "Ctrl+Alt+V"
+# Empty = %APPDATA%\Shelf\models\ggml-base.bin
+model = ""
+# auto, ru or en
+language = "auto"
+# Paste the text right away (Ctrl+V) instead of only copying it
+paste = false
+unload_after_min = 5
 "##;
 
 pub fn app_dir() -> PathBuf {
@@ -380,7 +413,7 @@ mod tests {
         assert_eq!(parse(DEFAULT_TOML).unwrap(), Config::default());
         // Every section must be spelled out, so users see all options in the generated file.
         let t: toml::Table = toml::from_str(DEFAULT_TOML).unwrap();
-        for s in ["hotkeys", "capture", "save", "tools", "history", "ink", "board"] {
+        for s in ["hotkeys", "capture", "save", "tools", "history", "ink", "board", "dictation"] {
             assert!(t.contains_key(s), "DEFAULT_TOML lacks [{s}]");
         }
     }

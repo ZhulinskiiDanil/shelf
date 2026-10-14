@@ -12,6 +12,8 @@ Shelf is a single portable executable. Download the latest `shelf-mN.exe` from [
 
 ## Build
 
+Requirements: Rust (MSVC), CMake and LLVM (`LIBCLANG_PATH` pointing to its `bin`) for whisper.cpp.
+
 ```
 cargo build --release
 cargo test
@@ -59,5 +61,6 @@ cargo test
 | Global | `Ctrl+Alt+C` | Toggle click rings |
 | Global | `Ctrl+Alt+K` | Toggle pressed-keys overlay |
 | Global | `Ctrl+Alt+B` | Thinking board (`Esc` saves to the shelf and closes) |
+| Global | Hold `Ctrl+Alt+V` | Dictation: record while held, text to clipboard on release |
 | Board | Same tool, color and width keys as capture markup; `Ctrl+Z` / `Ctrl+Y` | Draw |
 | Board | Middle button drag, `Space`+drag | Pan |

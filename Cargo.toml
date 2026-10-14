@@ -1,4 +1,4 @@
-[package]
+﻿[package]
 name = "shelf"
 version = "0.0.0"
 edition = "2024"
@@ -9,6 +9,7 @@ png = "0.18.1"
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.154"
 toml = "1.1.8"
+whisper-rs = "0.16.0"
 windows-core = "0.62.2"
 
 [dependencies.windows-numerics]
@@ -37,9 +38,14 @@ features = [
     "Win32_System_DataExchange",
     "Win32_System_Memory",
     "Win32_System_Ole",
+    "Win32_System_ProcessStatus",
     "Win32_System_SystemServices",
+    "Win32_System_Variant",
     "Win32_Graphics_Gdi",
     "Win32_Graphics_Imaging",
+    "Win32_Media_Audio",
+    "Win32_Media_KernelStreaming",
+    "Win32_Media_Multimedia",
     "Win32_Security",
     "Win32_Storage_FileSystem",
     "Win32_System_LibraryLoader",

@@ -61,6 +61,9 @@ unsafe extern "system" fn proc(code: i32, wp: WPARAM, lp: LPARAM) -> LRESULT {
             let k = &*(lp.0 as *const KBDLLHOOKSTRUCT);
             let m = wp.0 as u32;
             let down = m == WM_KEYDOWN || m == WM_SYSKEYDOWN;
+            if dict_key(k.vkCode, down) {
+                return LRESULT(1);
+            }
             if ink_key(k.vkCode, down) {
                 return LRESULT(1);
             }
@@ -309,5 +312,58 @@ fn hook_thread_loop() {
                 }
             }
         }
+    }
+}
+
+// ! --- Dictation hold key --- !
+
+pub const INK_DICT_DOWN: usize = 20;
+pub const INK_DICT_UP: usize = 21;
+static DICT_VK: AtomicU32 = AtomicU32::new(0);
+static DICT_MODS: AtomicU32 = AtomicU32::new(0);
+static DICT_ACTIVE: AtomicBool = AtomicBool::new(false);
+
+pub fn set_dictation_key(hk: Option<Hotkey>) {
+    DICT_VK.store(hk.map(|h| h.vk).unwrap_or(0), Ordering::Relaxed);
+    DICT_MODS.store(hk.map(|h| h.mods).unwrap_or(0), Ordering::Relaxed);
+}
+
+/// Swallowing a key of an Alt/Win combo would leave a lone Alt/Win press, which opens
+/// the window menu / Start. A "mask" key in between prevents that (same trick as AutoHotkey).
+fn send_mask_key() {
+    let ev = |up: bool| INPUT {
+        r#type: INPUT_KEYBOARD,
+        Anonymous: INPUT_0 { ki: KEYBDINPUT { wVk: VIRTUAL_KEY(0xE8), dwFlags: if up { KEYEVENTF_KEYUP } else { KEYBD_EVENT_FLAGS(0) }, ..Default::default() } },
+    };
+    unsafe {
+        SendInput(&[ev(false), ev(true)], size_of::<INPUT>() as i32);
+    }
+}
+
+/// Returns true to swallow.
+fn dict_key(vk: u32, down: bool) -> bool {
+    let dvk = DICT_VK.load(Ordering::Relaxed);
+    if dvk == 0 || vk != dvk {
+        return false;
+    }
+    if down {
+        if DICT_ACTIVE.load(Ordering::Relaxed) {
+            return true; // auto-repeat
+        }
+        let mods = DICT_MODS.load(Ordering::Relaxed);
+        if mods_now() != mods {
+            return false;
+        }
+        DICT_ACTIVE.store(true, Ordering::Relaxed);
+        if mods & (MOD_ALT | MOD_WIN) != 0 {
+            send_mask_key();
+        }
+        post_ink(INK_DICT_DOWN, 0);
+        true
+    } else if DICT_ACTIVE.swap(false, Ordering::Relaxed) {
+        post_ink(INK_DICT_UP, 0);
+        true
+    } else {
+        false
     }
 }

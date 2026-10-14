@@ -1,0 +1,18 @@
+# whisper.cpp (dictation): portable x86-64 build with AVX2/FMA/F16C (any CPU since ~2013).
+# GGML_NATIVE would tune for the build machine and could crash on older CPUs.
+[env]
+GGML_NATIVE = "OFF"
+GGML_AVX = "ON"
+GGML_AVX2 = "ON"
+GGML_FMA = "ON"
+GGML_F16C = "ON"
+# The cmake crate replaces the Release flags with cc's flags, which lack /O2 for MSVC:
+# whisper.cpp ended up unoptimized (7 s of audio took ~5 s on the tiny model).
+CMAKE_C_FLAGS_RELEASE = "/O2 /Ob2 /DNDEBUG /MT"
+CMAKE_CXX_FLAGS_RELEASE = "/O2 /Ob2 /DNDEBUG /MT"
+CMAKE_MSVC_RUNTIME_LIBRARY = "MultiThreaded"
+
+# Static CRT: the exe must run on a clean Windows without the VC++ redistributable
+# (whisper.cpp would otherwise pull in MSVCP140.dll).
+[target.x86_64-pc-windows-msvc]
+rustflags = ["-C", "target-feature=+crt-static"]

@@ -90,6 +90,8 @@ pub struct Ink {
     keys: explain::KeyLog,
     pub rings_on: bool,
     pub keys_on: bool,
+    /// Dictation indicator near the cursor: position and whether still recording.
+    pub indicator: Option<((i32, i32), bool)>,
 }
 
 thread_local! {
@@ -153,6 +155,7 @@ pub fn init() {
             keys: explain::KeyLog::default(),
             rings_on: false,
             keys_on: false,
+            indicator: None,
         };
         INK.with(|i| *i.borrow_mut() = Some(ink));
     }
@@ -444,7 +447,8 @@ impl Ink {
             && self.spot.is_none()
             && self.zoom.is_none()
             && self.rings.is_empty()
-            && self.keys.entries.is_empty();
+            && self.keys.entries.is_empty()
+            && self.indicator.is_none();
         self.set_animating(animating);
         if empty {
             self.set_shown(false);
@@ -520,6 +524,15 @@ impl Ink {
                         dc.FillEllipse(&D2D1_ELLIPSE { point: p, radiusX: 14.0, radiusY: 14.0 }, &glow);
                         dc.FillEllipse(&D2D1_ELLIPSE { point: p, radiusX: 6.0, radiusY: 6.0 }, &core);
                     }
+                }
+            }
+            // Dictation: a static dot next to the cursor (red = recording, grey = transcribing).
+            if let Some(((x, y), rec)) = self.indicator {
+                let s = self.scale_at(x, y);
+                let p = Vector2::new(x as f32 - o.0 + 18.0 * s, y as f32 - o.1 + 22.0 * s);
+                if let (Some(ring), Some(fill)) = (brush(0xFFFFFF, 0.9), brush(if rec { 0xE53935 } else { 0x9E9E9E }, 1.0)) {
+                    dc.FillEllipse(&D2D1_ELLIPSE { point: p, radiusX: 8.0 * s, radiusY: 8.0 * s }, &ring);
+                    dc.FillEllipse(&D2D1_ELLIPSE { point: p, radiusX: 6.0 * s, radiusY: 6.0 * s }, &fill);
                 }
             }
             // Pressed keys: a plate in the bottom-right corner of the primary monitor.
