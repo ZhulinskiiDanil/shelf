@@ -3,10 +3,13 @@
 mod capture;
 mod clipboard;
 mod config;
+mod dragdrop;
 mod geom;
+mod history;
 mod hook;
 mod imageio;
 mod logger;
+mod names;
 mod overlay;
 
 use std::cell::RefCell;
@@ -58,6 +61,7 @@ fn main() {
     logger::init();
     unsafe {
         let _ = SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
+        let _ = windows::Win32::System::Ole::OleInitialize(None);
     }
     acquire_single_instance();
 
@@ -193,6 +197,8 @@ pub fn shell_open(path: &Path) {
 
 fn apply_config(cfg: &config::Config, old: Option<&config::Config>) {
     logger::set_level(&cfg.log_level);
+    config::set_current(cfg);
+    history::set_template(&cfg.save.filename);
     if old.map(|o| o.autostart) != Some(cfg.autostart) {
         set_autostart(cfg.autostart);
     }

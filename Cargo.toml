@@ -7,7 +7,9 @@ edition = "2024"
 log = "0.4.34"
 png = "0.18.1"
 serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.154"
 toml = "1.1.8"
+windows-core = "0.62.2"
 
 [dependencies.windows-numerics]
 version = "*"
@@ -22,6 +24,7 @@ features = [
     "Win32_Graphics_Dwm",
     "Win32_Graphics_Dxgi_Common",
     "Win32_System_Com",
+    "Win32_System_Com_StructuredStorage",
     "Win32_System_DataExchange",
     "Win32_System_Memory",
     "Win32_System_Ole",
@@ -34,7 +37,11 @@ features = [
     "Win32_System_Threading",
     "Win32_UI_HiDpi",
     "Win32_UI_Input_KeyboardAndMouse",
+    "Win32_UI_Controls",
+    "Win32_UI_Controls_Dialogs",
     "Win32_UI_Shell",
+    "Win32_UI_Shell_Common",
+    "Win32_System_SystemInformation",
     "Win32_UI_WindowsAndMessaging",
 ]
 

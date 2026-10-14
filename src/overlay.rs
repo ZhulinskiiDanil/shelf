@@ -5,6 +5,7 @@
 use crate::capture::{self, Frame};
 use crate::clipboard::{self, Image};
 use crate::geom::{self, Grip, Rect};
+use crate::{config, history};
 use std::cell::RefCell;
 use std::sync::Arc;
 use std::time::Instant;
@@ -20,6 +21,7 @@ use windows::Win32::System::Threading::{AttachThreadInput, GetCurrentThreadId};
 use windows::Win32::UI::Input::KeyboardAndMouse::*;
 use windows::Win32::UI::WindowsAndMessaging::*;
 use windows::core::*;
+use std::os::windows::ffi::OsStrExt;
 use windows_numerics::Vector2;
 
 const CLASS: PCWSTR = w!("Shelf.Capture");
@@ -38,6 +40,10 @@ enum Mode {
 
 pub enum Finish {
     Copy,
+    CopyPath,
+    Save,
+    SaveAs,
+    Drag,
 }
 
 struct Gfx {
@@ -525,19 +531,55 @@ impl Overlay {
         }
     }
 
-    fn finish(&mut self, action: Finish, t0: Instant) {
+    /// Hides the overlay and returns the follow-up work, which the caller runs after
+    /// releasing the overlay borrow (dialogs and drag loops pump messages).
+    fn finish(&mut self, action: Finish, t0: Instant) -> Option<Box<dyn FnOnce()>> {
         let target = self.target();
         if target.is_empty() {
-            return;
+            return None;
         }
-        let Some(f) = self.frame.as_ref() else { return };
+        let f = self.frame.as_ref()?;
         let img = Arc::new(Image { w: target.w() as u32, h: target.h() as u32, bgra: f.crop(&target) });
         self.hide();
+        let owner = self.owner;
         match action {
             Finish::Copy => {
-                let ok = clipboard::set_image(self.owner, img);
+                let ok = clipboard::set_image(owner, img.clone());
                 log::info!("metric: ctrl+c->clipboard {:.1} ms ({}x{}, ok={ok})", t0.elapsed().as_secs_f64() * 1000.0, target.w(), target.h());
+                history::add_async(img, "capture");
+                None
             }
+            Finish::CopyPath => Some(Box::new(move || {
+                if let Some(p) = history::add(&img, "capture") {
+                    clipboard::set_text(owner, &format!("\"{}\"", p.display()));
+                }
+            })),
+            Finish::Save => {
+                history::run_async(move || {
+                    if let Some(p) = history::add(&img, "capture") {
+                        let dir = config::current().save_dir();
+                        match history::copy_to(&p, &dir) {
+                            Some(d) => log::info!("saved {}", d.display()),
+                            None => log::error!("save to {} failed", dir.display()),
+                        }
+                    }
+                });
+                None
+            }
+            Finish::SaveAs => Some(Box::new(move || {
+                if let Some(path) = save_dialog(owner) {
+                    let png = crate::imageio::encode_png(&img, png::Compression::Balanced);
+                    if let Err(e) = std::fs::write(&path, png) {
+                        log::error!("save {} failed: {e}", path.display());
+                    }
+                }
+                history::add_async(img, "capture");
+            })),
+            Finish::Drag => Some(Box::new(move || {
+                if let Some(p) = history::add(&img, "capture") {
+                    crate::dragdrop::drag_files(&[p], Some(&img), true);
+                }
+            })),
         }
     }
 }
@@ -612,7 +654,8 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) 
                 let t0 = Instant::now();
                 let vk = VIRTUAL_KEY(wp.0 as u16);
                 let ctrl = key_down(VK_CONTROL);
-                let step = if key_down(VK_SHIFT) { 10 } else { 1 };
+                let shift = key_down(VK_SHIFT);
+                let step = if shift { 10 } else { 1 };
                 match vk {
                     VK_ESCAPE => {
                         with(|o| o.hide());
@@ -629,9 +672,9 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) 
                     VK_DOWN => {
                         with(|o| o.nudge(0, step));
                     }
-                    VK_C if ctrl => {
-                        with(|o| o.finish(Finish::Copy, t0));
-                    }
+                    VK_C if ctrl => finish(if shift { Finish::CopyPath } else { Finish::Copy }, t0),
+                    VK_S if ctrl => finish(if shift { Finish::SaveAs } else { Finish::Save }, t0),
+                    VK_D if ctrl => finish(Finish::Drag, t0),
                     _ => {}
                 }
                 LRESULT(0)
@@ -646,4 +689,39 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) 
             _ => DefWindowProcW(hwnd, msg, wp, lp),
         }
     }
+}
+
+fn finish(action: Finish, t0: Instant) {
+    if let Some(Some(next)) = with(|o| o.finish(action, t0)) {
+        next();
+    }
+}
+
+fn save_dialog(owner: HWND) -> Option<std::path::PathBuf> {
+    use windows::Win32::UI::Controls::Dialogs::*;
+    let stem = crate::names::format_stem(&config::current().save.filename, &crate::names::now());
+    let mut buf = [0u16; 1024];
+    for (i, c) in format!("{stem}.png").encode_utf16().take(1000).enumerate() {
+        buf[i] = c;
+    }
+    let dir: Vec<u16> = config::current().save_dir().as_os_str().encode_wide().chain(Some(0)).collect();
+    let mut ofn = OPENFILENAMEW {
+        lStructSize: size_of::<OPENFILENAMEW>() as u32,
+        hwndOwner: owner,
+        lpstrFilter: w!("PNG\0*.png\0"),
+        lpstrFile: PWSTR(buf.as_mut_ptr()),
+        nMaxFile: buf.len() as u32,
+        lpstrInitialDir: PCWSTR(dir.as_ptr()),
+        lpstrDefExt: w!("png"),
+        Flags: OFN_OVERWRITEPROMPT | OFN_PATHMUSTEXIST | OFN_NOCHANGEDIR,
+        ..Default::default()
+    };
+    unsafe {
+        let _ = SetForegroundWindow(owner);
+        if !GetSaveFileNameW(&mut ofn).as_bool() {
+            return None;
+        }
+    }
+    let len = buf.iter().position(|&c| c == 0).unwrap_or(buf.len());
+    Some(std::path::PathBuf::from(String::from_utf16_lossy(&buf[..len])))
 }

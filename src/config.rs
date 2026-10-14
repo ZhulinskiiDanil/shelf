@@ -8,6 +8,42 @@ pub struct Config {
     pub autostart: bool,
     pub hotkeys: Hotkeys,
     pub capture: Capture,
+    pub save: Save,
+}
+
+#[derive(Debug, Clone, Deserialize, PartialEq)]
+#[serde(default)]
+pub struct Save {
+    /// Folder for Ctrl+S; empty means Pictures\Shelf.
+    pub dir: String,
+    /// File name template: %Y %m %d %H %M %S.
+    pub filename: String,
+}
+
+impl Default for Save {
+    fn default() -> Self {
+        Self { dir: String::new(), filename: "shelf_%Y-%m-%d_%H-%M-%S".into() }
+    }
+}
+
+impl Config {
+    pub fn save_dir(&self) -> PathBuf {
+        if !self.save.dir.trim().is_empty() {
+            return PathBuf::from(self.save.dir.trim());
+        }
+        let home = std::env::var_os("USERPROFILE").map(PathBuf::from).unwrap_or_else(app_dir);
+        home.join("Pictures").join("Shelf")
+    }
+}
+
+static CURRENT: std::sync::RwLock<Option<Config>> = std::sync::RwLock::new(None);
+
+pub fn set_current(c: &Config) {
+    *CURRENT.write().unwrap() = Some(c.clone());
+}
+
+pub fn current() -> Config {
+    CURRENT.read().unwrap().clone().unwrap_or_default()
 }
 
 #[derive(Debug, Clone, Deserialize, PartialEq)]
@@ -31,7 +67,7 @@ pub struct Hotkeys {
 
 impl Default for Config {
     fn default() -> Self {
-        Self { log_level: "info".into(), autostart: false, hotkeys: Hotkeys::default(), capture: Capture::default() }
+        Self { log_level: "info".into(), autostart: false, hotkeys: Hotkeys::default(), capture: Capture::default(), save: Save::default() }
     }
 }
 
@@ -56,6 +92,12 @@ shelf = "Ctrl+Shift+Space"
 [capture]
 # Pixel magnifier next to the cursor
 magnifier = true
+
+[save]
+# Folder for Ctrl+S (empty = Pictures\Shelf)
+dir = ""
+# File name template: %Y %m %d %H %M %S
+filename = "shelf_%Y-%m-%d_%H-%M-%S"
 "#;
 
 pub fn app_dir() -> PathBuf {

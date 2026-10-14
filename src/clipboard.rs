@@ -47,7 +47,7 @@ fn open(owner: HWND) -> bool {
     false
 }
 
-pub fn set_image(owner: HWND, img: std::sync::Arc<Image>) -> bool {
+pub fn dib_global(img: &Image) -> Option<HGLOBAL> {
     let hdr = BITMAPINFOHEADER {
         biSize: size_of::<BITMAPINFOHEADER>() as u32,
         biWidth: img.w as i32,
@@ -63,7 +63,11 @@ pub fn set_image(owner: HWND, img: std::sync::Arc<Image>) -> bool {
     let stride = img.w as usize * 4;
     let mut parts: Vec<&[u8]> = vec![hdr_bytes];
     parts.extend(img.bgra.chunks_exact(stride).rev());
-    let Some(dib) = global_from(&parts) else { return false };
+    global_from(&parts)
+}
+
+pub fn set_image(owner: HWND, img: std::sync::Arc<Image>) -> bool {
+    let Some(dib) = dib_global(&img) else { return false };
     if !open(owner) {
         log::warn!("clipboard busy");
         unsafe {
