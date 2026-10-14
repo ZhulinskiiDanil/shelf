@@ -36,6 +36,8 @@ cargo test
 | Capture | `Ctrl+Shift+S` | Save as… |
 | Capture | `Ctrl+D` | Attach file to cursor, click to drop (`Esc` cancels) |
 | Capture | `Ctrl+T` | Recognize text (OCR) and copy it |
+| Capture | `Ctrl+R` | Record the selected area to MP4 |
+| Global | `Ctrl+Alt+R` | Stop recording (video goes to history and to the clipboard as a file) |
 | Capture | `Esc`, right click | Cancel |
 | Capture | `P` `L` `A` `R` `E` `M` `T` `B` `N` | Pen, line, arrow, rectangle, ellipse, marker, text, pixelate, numbered marker |
 | Capture | `1`–`8` | Color |

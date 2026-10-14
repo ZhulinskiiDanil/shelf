@@ -14,6 +14,23 @@ pub struct Config {
     pub ink: Ink,
     pub board: Board,
     pub dictation: Dictation,
+    pub record: Record,
+}
+
+#[derive(Debug, Clone, Deserialize, PartialEq)]
+#[serde(default)]
+pub struct Record {
+    /// Global hotkey that stops a recording started with Ctrl+R in capture mode.
+    pub stop: String,
+    pub fps: u32,
+    /// Draw the mouse cursor into the video.
+    pub cursor: bool,
+}
+
+impl Default for Record {
+    fn default() -> Self {
+        Self { stop: "Ctrl+Alt+R".into(), fps: 30, cursor: true }
+    }
 }
 
 #[derive(Debug, Clone, Deserialize, PartialEq)]
@@ -217,7 +234,7 @@ pub struct Hotkeys {
 
 impl Default for Config {
     fn default() -> Self {
-        Self { log_level: "info".into(), autostart: false, hotkeys: Hotkeys::default(), capture: Capture::default(), save: Save::default(), tools: Tools::default(), history: History::default(), ink: Ink::default(), board: Board::default(), dictation: Dictation::default() }
+        Self { log_level: "info".into(), autostart: false, hotkeys: Hotkeys::default(), capture: Capture::default(), save: Save::default(), tools: Tools::default(), history: History::default(), ink: Ink::default(), board: Board::default(), dictation: Dictation::default(), record: Record::default() }
     }
 }
 
@@ -305,6 +322,12 @@ language = "auto"
 # Paste the text right away (Ctrl+V) instead of only copying it
 paste = false
 unload_after_min = 5
+
+# Area recording: select an area after PrtScrn and press Ctrl+R; stop with this hotkey
+[record]
+stop = "Ctrl+Alt+R"
+fps = 30
+cursor = true
 "##;
 
 pub fn app_dir() -> PathBuf {
@@ -413,7 +436,7 @@ mod tests {
         assert_eq!(parse(DEFAULT_TOML).unwrap(), Config::default());
         // Every section must be spelled out, so users see all options in the generated file.
         let t: toml::Table = toml::from_str(DEFAULT_TOML).unwrap();
-        for s in ["hotkeys", "capture", "save", "tools", "history", "ink", "board", "dictation"] {
+        for s in ["hotkeys", "capture", "save", "tools", "history", "ink", "board", "dictation", "record"] {
             assert!(t.contains_key(s), "DEFAULT_TOML lacks [{s}]");
         }
     }

@@ -48,6 +48,7 @@ pub enum Finish {
     SaveAs,
     Drag,
     Ocr,
+    Record,
 }
 
 struct Gfx {
@@ -907,6 +908,17 @@ impl Overlay {
                 }
                 history::add_async(img, "capture");
             })),
+            Finish::Record => {
+                // The area, not the pixels: recording grabs live frames.
+                let cfg = config::current().record;
+                if let Some(r) = crate::record::start(target, cfg.fps, cfg.cursor) {
+                    crate::ink::with(|i| {
+                        i.rec_rect = Some(r);
+                        i.request_render();
+                    });
+                }
+                None
+            }
             Finish::Ocr => {
                 crate::ocr_to_clipboard(img.clone());
                 history::add_async(img, "capture");
@@ -1024,6 +1036,7 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) 
                     VK_S if ctrl => finish(if shift { Finish::SaveAs } else { Finish::Save }, t0),
                     VK_D if ctrl => finish(Finish::Drag, t0),
                     VK_T if ctrl => finish(Finish::Ocr, t0),
+                    VK_R if ctrl => finish(Finish::Record, t0),
                     _ => {}
                 }
                 LRESULT(0)

@@ -45,6 +45,7 @@ features = [
     "Win32_Graphics_Imaging",
     "Win32_Media_Audio",
     "Win32_Media_KernelStreaming",
+    "Win32_Media_MediaFoundation",
     "Win32_Media_Multimedia",
     "Win32_Security",
     "Win32_Storage_FileSystem",

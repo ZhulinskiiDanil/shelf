@@ -19,6 +19,7 @@ mod logger;
 mod names;
 mod ocr;
 mod overlay;
+mod record;
 mod shelf;
 
 use std::cell::RefCell;
@@ -58,6 +59,7 @@ pub const HK_ZOOM: i32 = 6;
 pub const HK_RINGS: i32 = 7;
 pub const HK_KEYS: i32 = 8;
 pub const HK_BOARD: i32 = 9;
+pub const HK_REC_STOP: i32 = 10;
 
 struct App {
     hwnd: HWND,
@@ -239,7 +241,7 @@ fn apply_config(cfg: &config::Config, old: Option<&config::Config>) {
     }
     overlay::set_magnifier(cfg.capture.magnifier);
     board::configure(cfg.board.opacity, config::parse_color(&cfg.board.background).unwrap_or(0x1E1E1E));
-    if old.map(|o| (&o.hotkeys, &o.ink, &o.board.hotkey, &o.dictation.hold)) != Some((&cfg.hotkeys, &cfg.ink, &cfg.board.hotkey, &cfg.dictation.hold)) {
+    if old.map(|o| (&o.hotkeys, &o.ink, &o.board.hotkey, &o.dictation.hold, &o.record.stop)) != Some((&cfg.hotkeys, &cfg.ink, &cfg.board.hotkey, &cfg.dictation.hold, &cfg.record.stop)) {
         register_hotkeys(cfg);
     }
     sync_ink_features();
@@ -284,6 +286,7 @@ fn register_hotkeys(cfg: &config::Config) {
         (HK_RINGS, "click rings", &cfg.ink.click_rings_toggle),
         (HK_KEYS, "show keys", &cfg.ink.keys_toggle),
         (HK_BOARD, "board", &cfg.board.hotkey),
+        (HK_REC_STOP, "record stop", &cfg.record.stop),
     ] {
         unsafe {
             let _ = UnregisterHotKey(Some(hwnd), id);
@@ -361,6 +364,7 @@ fn on_hotkey(id: i32) {
     match id {
         HK_SHELF => shelf::toggle(),
         HK_BOARD => board::toggle(),
+        HK_REC_STOP => stop_recording(),
         HK_INK_STICKY => set_ink_sticky(!hook::STICKY.load(std::sync::atomic::Ordering::Relaxed)),
         HK_INK_CLEAR => {
             ink::with(|i| i.clear());
@@ -695,4 +699,32 @@ pub fn trim_working_set() {
     unsafe {
         let _ = windows::Win32::System::ProcessStatus::EmptyWorkingSet(windows::Win32::System::Threading::GetCurrentProcess());
     }
+}
+
+// ! --- Area recording --- !
+
+fn stop_recording() {
+    if !record::is_recording() {
+        return;
+    }
+    ink::with(|i| {
+        i.rec_rect = None;
+        i.request_render();
+    });
+    // Finalizing the MP4 takes a moment; keep the UI thread free.
+    std::thread::spawn(|| match record::stop() {
+        Some(Ok((tmp, first))) => {
+            if let Some(path) = history::add_file(&tmp, "mp4", &first, "record") {
+                log::info!("record: saved {}", path.display());
+                run_on_main(move || {
+                    clipboard::set_files(main_hwnd(), &[path]);
+                });
+            }
+        }
+        Some(Err(e)) => {
+            log::error!("record failed: {e}");
+            run_on_main(|| notify("Shelf", "Запись не удалась — подробности в логе"));
+        }
+        None => {}
+    });
 }

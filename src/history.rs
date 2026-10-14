@@ -270,3 +270,26 @@ mod tests {
         assert!(prune_victims(&idx, 1, 10).is_empty());
     }
 }
+
+/// Moves an already encoded file (e.g. a recording) into history with a thumbnail.
+pub fn add_file(src: &Path, ext: &str, thumb: &Image, source: &str) -> Option<PathBuf> {
+    let d = dir();
+    let _ = std::fs::create_dir_all(&d);
+    let stem = names::format_stem(&TEMPLATE.lock().unwrap(), &names::now());
+    let path = with_index(|idx| {
+        let name = names::unique_name(&stem, ext, |n| d.join(n).exists());
+        let path = d.join(&name);
+        if std::fs::rename(src, &path).is_err() {
+            std::fs::copy(src, &path).ok()?;
+            let _ = std::fs::remove_file(src);
+        }
+        let bytes = std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
+        let created = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
+        idx.push(Entry { file: name.clone(), created, pinned: false, source: source.into(), bytes, w: thumb.w, h: thumb.h });
+        write_thumb(&name, thumb);
+        save_index(idx);
+        Some(path)
+    });
+    notify();
+    path
+}

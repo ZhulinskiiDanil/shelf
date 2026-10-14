@@ -131,3 +131,49 @@ pub fn render_all(owner: HWND) {
 pub fn release() {
     *PENDING_PNG.lock().unwrap() = None;
 }
+
+/// CF_HDROP payload: DROPFILES header followed by double-NUL-terminated UTF-16 paths.
+pub fn dropfiles_bytes(paths: &[std::path::PathBuf]) -> Vec<u8> {
+    use std::os::windows::ffi::OsStrExt;
+    let mut v = Vec::new();
+    v.extend_from_slice(&20u32.to_le_bytes()); // pFiles: offset of the list
+    v.extend_from_slice(&[0u8; 8]); // pt
+    v.extend_from_slice(&0u32.to_le_bytes()); // fNC
+    v.extend_from_slice(&1u32.to_le_bytes()); // fWide
+    for p in paths {
+        for c in p.as_os_str().encode_wide().chain(Some(0)) {
+            v.extend_from_slice(&c.to_le_bytes());
+        }
+    }
+    v.extend_from_slice(&[0, 0]);
+    v
+}
+
+/// Puts files on the clipboard (paste into Explorer, Discord, browsers).
+pub fn set_files(owner: HWND, paths: &[std::path::PathBuf]) -> bool {
+    let Some(h) = global_from(&[&dropfiles_bytes(paths)]) else { return false };
+    if !open(owner) {
+        return false;
+    }
+    unsafe {
+        let _ = EmptyClipboard();
+        let ok = SetClipboardData(windows::Win32::System::Ole::CF_HDROP.0 as u32, Some(HANDLE(h.0))).is_ok();
+        let _ = CloseClipboard();
+        ok
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn dropfiles_layout() {
+        let b = dropfiles_bytes(&[std::path::PathBuf::from("C:/a.mp4"), std::path::PathBuf::from("D:/b")]);
+        assert_eq!(&b[0..4], &20u32.to_le_bytes());
+        assert_eq!(&b[16..20], &1u32.to_le_bytes());
+        let wide: Vec<u16> = b[20..].chunks_exact(2).map(|c| u16::from_le_bytes([c[0], c[1]])).collect();
+        let s = String::from_utf16(&wide).unwrap();
+        assert_eq!(s, "C:/a.mp4\0D:/b\0\0");
+    }
+}

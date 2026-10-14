@@ -303,6 +303,15 @@ impl Shelf {
                     let d = D2D_RECT_F { left: cx - w / 2.0, top: cy - h / 2.0, right: cx + w / 2.0, bottom: cy + h / 2.0 };
                     rt.DrawBitmap(&b, Some(&d), 1.0, D2D1_BITMAP_INTERPOLATION_MODE_LINEAR, None);
                 }
+                if self.items[i].file.ends_with(".mp4") {
+                    if let (Some(f), Some(bg)) = (&fmt, brush(0x000000, 0.7)) {
+                        let t: Vec<u16> = "▶ MP4".encode_utf16().collect();
+                        let lr = D2D_RECT_F { left: rf.right - 58.0 * s, top: rf.bottom - 22.0 * s, right: rf.right - 4.0 * s, bottom: rf.bottom - 4.0 * s };
+                        rt.FillRectangle(&lr, &bg);
+                        let tr = D2D_RECT_F { left: lr.left + 6.0 * s, top: lr.top + 1.0 * s, right: lr.right, bottom: lr.bottom };
+                        rt.DrawText(&t, f, &tr, &text, D2D1_DRAW_TEXT_OPTIONS_NONE, DWRITE_MEASURING_MODE_NATURAL);
+                    }
+                }
                 if self.items[i].pinned {
                     if let Some(f) = &fmt {
                         let t: Vec<u16> = "★".encode_utf16().collect();
@@ -314,7 +323,6 @@ impl Shelf {
                     rt.DrawRectangle(&rf, &accent, 3.0 * s, None);
                 }
             }
-            let _ = text;
             if rt.EndDraw(None, None).is_err() {
                 self.rt = None;
             }

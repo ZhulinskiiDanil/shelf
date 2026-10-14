@@ -92,6 +92,8 @@ pub struct Ink {
     pub keys_on: bool,
     /// Dictation indicator near the cursor: position and whether still recording.
     pub indicator: Option<((i32, i32), bool)>,
+    /// Area being recorded: a frame is drawn just outside it (so it is not in the video).
+    pub rec_rect: Option<Rect>,
 }
 
 thread_local! {
@@ -156,6 +158,7 @@ pub fn init() {
             rings_on: false,
             keys_on: false,
             indicator: None,
+            rec_rect: None,
         };
         INK.with(|i| *i.borrow_mut() = Some(ink));
     }
@@ -448,7 +451,8 @@ impl Ink {
             && self.zoom.is_none()
             && self.rings.is_empty()
             && self.keys.entries.is_empty()
-            && self.indicator.is_none();
+            && self.indicator.is_none()
+            && self.rec_rect.is_none();
         self.set_animating(animating);
         if empty {
             self.set_shown(false);
@@ -523,6 +527,24 @@ impl Ink {
                     if let (Some(glow), Some(core)) = (brush(0xFF1744, 0.35), brush(0xFF5252, 1.0)) {
                         dc.FillEllipse(&D2D1_ELLIPSE { point: p, radiusX: 14.0, radiusY: 14.0 }, &glow);
                         dc.FillEllipse(&D2D1_ELLIPSE { point: p, radiusX: 6.0, radiusY: 6.0 }, &core);
+                    }
+                }
+            }
+            if let Some(r) = self.rec_rect {
+                let s = self.scale_at(r.l, r.t);
+                if let (Some(red), Some(bg), Some(fg)) = (brush(0xE53935, 1.0), brush(0x202020, 0.85), brush(0xFFFFFF, 1.0)) {
+                    let b = 3.0 * s;
+                    let fr = lr(r.l as f32 - b, r.t as f32 - b, r.r as f32 + b, r.b as f32 + b);
+                    dc.DrawRectangle(&fr, &red, 2.0 * s, None);
+                    if let Some(fmt) = g.res.text_format(12.0 * s) {
+                        let label = format!("● REC   {} — stop", crate::config::current().record.stop);
+                        let t: Vec<u16> = label.encode_utf16().collect();
+                        let h = 22.0 * s;
+                        let top = if r.t as f32 - b - h - 4.0 * s >= self.bounds.t as f32 { r.t as f32 - b - h - 4.0 * s } else { r.b as f32 + b + 4.0 * s };
+                        let lab = lr(r.l as f32 - b, top, r.l as f32 - b + 7.5 * s * label.chars().count() as f32 + 16.0 * s, top + h);
+                        dc.FillRectangle(&lab, &bg);
+                        let tr = D2D_RECT_F { left: lab.left + 8.0 * s, top: lab.top + 3.0 * s, right: lab.right, bottom: lab.bottom };
+                        dc.DrawText(&t, &fmt, &tr, &fg, D2D1_DRAW_TEXT_OPTIONS_NONE, DWRITE_MEASURING_MODE_NATURAL);
                     }
                 }
             }
