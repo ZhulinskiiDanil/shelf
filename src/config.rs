@@ -10,6 +10,23 @@ pub struct Config {
     pub capture: Capture,
     pub save: Save,
     pub tools: Tools,
+    pub history: History,
+}
+
+#[derive(Debug, Clone, Deserialize, PartialEq)]
+#[serde(default)]
+pub struct History {
+    /// Also keep images copied by other apps.
+    pub watch_clipboard: bool,
+    /// Limits apply to unpinned entries; pinned ones are never removed.
+    pub max_items: usize,
+    pub max_mb: u64,
+}
+
+impl Default for History {
+    fn default() -> Self {
+        Self { watch_clipboard: true, max_items: 500, max_mb: 2048 }
+    }
 }
 
 /// Single keys that pick markup tools in capture mode (no modifiers).
@@ -98,7 +115,7 @@ pub struct Hotkeys {
 
 impl Default for Config {
     fn default() -> Self {
-        Self { log_level: "info".into(), autostart: false, hotkeys: Hotkeys::default(), capture: Capture::default(), save: Save::default(), tools: Tools::default() }
+        Self { log_level: "info".into(), autostart: false, hotkeys: Hotkeys::default(), capture: Capture::default(), save: Save::default(), tools: Tools::default(), history: History::default() }
     }
 }
 

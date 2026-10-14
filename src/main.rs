@@ -2,6 +2,7 @@
 
 mod annot;
 mod capture;
+mod clipwatch;
 mod clipboard;
 mod config;
 mod dragdrop;
@@ -12,6 +13,7 @@ mod imageio;
 mod logger;
 mod names;
 mod overlay;
+mod shelf;
 
 use std::cell::RefCell;
 use std::path::Path;
@@ -103,6 +105,7 @@ fn main() {
         add_tray_icon(hwnd);
         hook::start(hwnd, WM_APP_CAPTURE);
         overlay::init(hwnd, cfg.capture.magnifier);
+        shelf::init();
         apply_config(&cfg, None);
         spawn_config_watcher(hwnd);
 
@@ -200,6 +203,11 @@ fn apply_config(cfg: &config::Config, old: Option<&config::Config>) {
     logger::set_level(&cfg.log_level);
     config::set_current(cfg);
     history::set_template(&cfg.save.filename);
+    history::set_limits(cfg.history.max_items, cfg.history.max_mb);
+    if old.map(|o| o.history.watch_clipboard) != Some(cfg.history.watch_clipboard) {
+        let hwnd = APP.with(|a| a.borrow().as_ref().unwrap().hwnd);
+        clipwatch::set_enabled(hwnd, cfg.history.watch_clipboard);
+    }
     if old.map(|o| o.autostart) != Some(cfg.autostart) {
         set_autostart(cfg.autostart);
     }
@@ -297,7 +305,7 @@ fn reload_config() {
 
 fn on_hotkey(id: i32) {
     match id {
-        HK_SHELF => log::info!("shelf hotkey"),
+        HK_SHELF => shelf::toggle(),
         _ => {}
     }
 }
@@ -342,6 +350,10 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) 
             }
             WM_RENDERALLFORMATS => {
                 clipboard::render_all(hwnd);
+                LRESULT(0)
+            }
+            WM_CLIPBOARDUPDATE => {
+                clipwatch::on_update(hwnd);
                 LRESULT(0)
             }
             WM_DESTROYCLIPBOARD => {

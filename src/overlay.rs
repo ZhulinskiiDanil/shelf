@@ -176,10 +176,6 @@ fn set_cloak(hwnd: HWND, on: bool) {
     }
 }
 
-pub fn is_visible() -> bool {
-    with(|o| o.visible).unwrap_or(false)
-}
-
 /// Entry point from the hotkey hook. `t0` is when the key was pressed.
 pub fn show(t0: Instant) {
     with(|o| o.show(t0));
@@ -921,7 +917,7 @@ impl Overlay {
 
 /// SetForegroundWindow is refused unless we own the last input; attach to the
 /// foreground thread's input queue for the call.
-unsafe fn force_foreground(hwnd: HWND) {
+pub unsafe fn force_foreground(hwnd: HWND) {
     unsafe {
         let fg = GetForegroundWindow();
         let fg_thread = GetWindowThreadProcessId(fg, None);

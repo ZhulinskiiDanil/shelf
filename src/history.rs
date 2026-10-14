@@ -85,8 +85,15 @@ pub fn add(img: &Image, source: &str) -> Option<PathBuf> {
         let path = d.join(&name);
         std::fs::write(&path, &png).ok()?;
         let created = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
-        idx.push(Entry { file: name, created, pinned: false, source: source.into(), bytes: png.len() as u64, w: img.w, h: img.h });
+        idx.push(Entry { file: name.clone(), created, pinned: false, source: source.into(), bytes: png.len() as u64, w: img.w, h: img.h });
+        write_thumb(&name, img);
+        let (max_items, max_bytes) = *LIMITS.lock().unwrap();
+        for victim in prune_victims(idx, max_items, max_bytes) {
+            let e = idx.remove(victim);
+            remove_files(&e.file);
+        }
         save_index(idx);
+        notify();
         Some(path)
     });
     if let Some(p) = &path {
@@ -108,4 +115,158 @@ pub fn copy_to(src: &Path, dir: &Path) -> Option<PathBuf> {
     let dest = dir.join(names::unique_name(stem, ext, |n| dir.join(n).exists()));
     std::fs::copy(src, &dest).ok()?;
     Some(dest)
+}
+
+// ! --- Limits --- !
+
+static LIMITS: Mutex<(usize, u64)> = Mutex::new((usize::MAX, u64::MAX));
+
+pub fn set_limits(max_items: usize, max_mb: u64) {
+    *LIMITS.lock().unwrap() = (max_items.max(1), max_mb.saturating_mul(1024 * 1024).max(1));
+}
+
+/// Indices to delete (descending, so they can be removed in order) to bring the
+/// unpinned history within limits. Oldest unpinned entries go first; pinned never.
+pub fn prune_victims(idx: &[Entry], max_items: usize, max_bytes: u64) -> Vec<usize> {
+    let mut order: Vec<usize> = (0..idx.len()).filter(|&i| !idx[i].pinned).collect();
+    order.sort_by_key(|&i| (idx[i].created, i));
+    let mut count = idx.len();
+    let mut bytes: u64 = idx.iter().map(|e| e.bytes).sum();
+    let mut out = Vec::new();
+    for i in order {
+        if count <= max_items && bytes <= max_bytes {
+            break;
+        }
+        count -= 1;
+        bytes -= idx[i].bytes;
+        out.push(i);
+    }
+    out.sort_unstable_by(|a, b| b.cmp(a));
+    out
+}
+
+// ! --- Thumbnails and shelf operations --- !
+
+pub const THUMB_W: u32 = 320;
+pub const THUMB_H: u32 = 200;
+
+fn thumb_path(file: &str) -> PathBuf {
+    dir().join("thumbs").join(format!("{file}.thumb"))
+}
+
+fn write_thumb(file: &str, img: &Image) {
+    let t = crate::imageio::thumbnail(img, THUMB_W, THUMB_H);
+    let _ = std::fs::create_dir_all(dir().join("thumbs"));
+    let mut b = Vec::with_capacity(8 + t.bgra.len());
+    b.extend_from_slice(&t.w.to_le_bytes());
+    b.extend_from_slice(&t.h.to_le_bytes());
+    b.extend_from_slice(&t.bgra);
+    let _ = std::fs::write(thumb_path(file), b);
+}
+
+/// Thumbnail for a history file; generated from the PNG if missing.
+pub fn load_thumb(file: &str) -> Option<Image> {
+    if let Ok(b) = std::fs::read(thumb_path(file)) {
+        if b.len() >= 8 {
+            let w = u32::from_le_bytes(b[0..4].try_into().unwrap());
+            let h = u32::from_le_bytes(b[4..8].try_into().unwrap());
+            if b.len() == 8 + (w * h * 4) as usize {
+                return Some(Image { w, h, bgra: b[8..].to_vec() });
+            }
+        }
+    }
+    let img = crate::imageio::decode_png(&std::fs::read(dir().join(file)).ok()?)?;
+    write_thumb(file, &img);
+    load_thumb_mem(&img)
+}
+
+fn load_thumb_mem(img: &Image) -> Option<Image> {
+    Some(crate::imageio::thumbnail(img, THUMB_W, THUMB_H))
+}
+
+fn remove_files(file: &str) {
+    let _ = std::fs::remove_file(dir().join(file));
+    let _ = std::fs::remove_file(thumb_path(file));
+}
+
+/// Newest first; drops entries whose file is gone.
+pub fn list() -> Vec<Entry> {
+    with_index(|idx| {
+        let before = idx.len();
+        idx.retain(|e| dir().join(&e.file).exists());
+        if idx.len() != before {
+            save_index(idx);
+        }
+        let mut v = idx.clone();
+        v.reverse();
+        v
+    })
+}
+
+pub fn delete(files: &[String]) {
+    with_index(|idx| {
+        idx.retain(|e| {
+            let gone = files.contains(&e.file);
+            if gone {
+                remove_files(&e.file);
+            }
+            !gone
+        });
+        save_index(idx);
+    });
+    notify();
+}
+
+pub fn set_pinned(files: &[String], pinned: bool) {
+    with_index(|idx| {
+        for e in idx.iter_mut().filter(|e| files.contains(&e.file)) {
+            e.pinned = pinned;
+        }
+        save_index(idx);
+    });
+    notify();
+}
+
+pub fn path_of(file: &str) -> PathBuf {
+    dir().join(file)
+}
+
+/// Optional callback (e.g. shelf window refresh) after history changes; called from any thread.
+static ON_CHANGE: Mutex<Option<Box<dyn Fn() + Send>>> = Mutex::new(None);
+
+pub fn on_change(f: impl Fn() + Send + 'static) {
+    *ON_CHANGE.lock().unwrap() = Some(Box::new(f));
+}
+
+fn notify() {
+    if let Some(f) = ON_CHANGE.lock().unwrap().as_ref() {
+        f();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn e(created: u64, bytes: u64, pinned: bool) -> Entry {
+        Entry { file: format!("{created}.png"), created, pinned, source: String::new(), bytes, w: 1, h: 1 }
+    }
+
+    #[test]
+    fn prune_by_count_skips_pinned() {
+        let idx = vec![e(1, 10, true), e(2, 10, false), e(3, 10, false), e(4, 10, false)];
+        assert_eq!(prune_victims(&idx, 2, u64::MAX), vec![2, 1]);
+    }
+
+    #[test]
+    fn prune_by_size_oldest_first() {
+        let idx = vec![e(5, 50, false), e(1, 50, false), e(9, 50, false)];
+        assert_eq!(prune_victims(&idx, 100, 100), vec![1]);
+    }
+
+    #[test]
+    fn prune_cannot_go_below_pinned() {
+        let idx = vec![e(1, 100, true), e(2, 100, true)];
+        assert!(prune_victims(&idx, 1, 10).is_empty());
+    }
 }

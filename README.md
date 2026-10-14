@@ -40,3 +40,9 @@ cargo test
 | Capture | `Shift` while drawing | Snap to 45° / square / circle |
 | Capture | `Ctrl+Z` / `Ctrl+Y` | Undo / redo markup |
 | Capture, text | `Enter` / `Esc` · `Shift+Enter` | Finish text · new line |
+| Global | `Ctrl+Shift+Space` | Open / close the shelf |
+| Shelf | Click, `Ctrl`/`Shift`+click, `Ctrl+A`, arrows | Select |
+| Shelf | Drag | Drag files out (closes the shelf on drop) |
+| Shelf | `Ctrl+C` · `Ctrl+Shift+C` | Copy image · copy quoted paths |
+| Shelf | `P` · `Del` · `O` · `Enter` | Pin · delete · show in folder · open |
+| Shelf | `Esc`, click outside | Close |
