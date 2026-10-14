@@ -20,6 +20,8 @@ mod names;
 mod ocr;
 mod overlay;
 mod record;
+mod settings;
+mod settings_model;
 mod shelf;
 
 use std::cell::RefCell;
@@ -49,6 +51,7 @@ const MENU_SETTINGS: usize = 1;
 const MENU_HISTORY: usize = 2;
 const MENU_EXIT: usize = 3;
 const MENU_DICT_HELP: usize = 4;
+const MENU_CONFIG: usize = 5;
 
 // Hotkey ids
 pub const HK_SHELF: i32 = 2;
@@ -128,6 +131,7 @@ fn main() {
         overlay::init(hwnd, cfg.capture.magnifier);
         shelf::init();
         board::init();
+        settings::init();
         ink::init();
         hook::set_ink_msg(WM_APP_INK);
         apply_config(&cfg, None);
@@ -136,6 +140,9 @@ fn main() {
 
         let mut msg = MSG::default();
         while GetMessageW(&mut msg, None, 0, 0).as_bool() {
+            if settings::is_dialog_message(&msg) {
+                continue;
+            }
             let _ = TranslateMessage(&msg);
             DispatchMessageW(&msg);
         }
@@ -203,13 +210,14 @@ fn remove_tray_icon(hwnd: HWND) {
 fn show_tray_menu(hwnd: HWND) {
     unsafe {
         let menu = CreatePopupMenu().unwrap();
-        let _ = AppendMenuW(menu, MF_STRING, MENU_SETTINGS, w!("РќР°СЃС‚СЂРѕР№РєРё (config.toml)"));
-        let _ = AppendMenuW(menu, MF_STRING, MENU_HISTORY, w!("РћС‚РєСЂС‹С‚СЊ РїР°РїРєСѓ РёСЃС‚РѕСЂРёРё"));
+        let _ = AppendMenuW(menu, MF_STRING, MENU_SETTINGS, w!("Настройки…"));
+        let _ = AppendMenuW(menu, MF_STRING, MENU_CONFIG, w!("Открыть config.toml"));
+        let _ = AppendMenuW(menu, MF_STRING, MENU_HISTORY, w!("Открыть папку истории"));
         if !dictation::model_present() {
-            let _ = AppendMenuW(menu, MF_STRING, MENU_DICT_HELP, w!("Р”РёРєС‚РѕРІРєР°: РіРґРµ РІР·СЏС‚СЊ РјРѕРґРµР»СЊвЂ¦"));
+            let _ = AppendMenuW(menu, MF_STRING, MENU_DICT_HELP, w!("Диктовка: где взять модель…"));
         }
         let _ = AppendMenuW(menu, MF_SEPARATOR, 0, None);
-        let _ = AppendMenuW(menu, MF_STRING, MENU_EXIT, w!("Р’С‹С…РѕРґ"));
+        let _ = AppendMenuW(menu, MF_STRING, MENU_EXIT, w!("Выход"));
         let mut pt = POINT::default();
         let _ = GetCursorPos(&mut pt);
         let _ = SetForegroundWindow(hwnd);
@@ -249,6 +257,10 @@ fn apply_config(cfg: &config::Config, old: Option<&config::Config>) {
 
 fn register_hotkeys(cfg: &config::Config) {
     let hwnd = APP.with(|a| a.borrow().as_ref().unwrap().hwnd);
+    let mut failed = Vec::new();
+    for c in settings_model::global_conflicts(cfg) {
+        log::warn!("hotkey conflict: {c}");
+    }
     match config::parse_hotkey(&cfg.dictation.hold) {
         Ok(hk) => hook::set_dictation_key(Some(hk)),
         Err(e) => {
@@ -273,6 +285,7 @@ fn register_hotkeys(cfg: &config::Config) {
     ink::with(|i| {
         i.fade_delay = std::time::Duration::from_millis(cfg.ink.fade_ms);
         i.width = cfg.ink.width.clamp(1.0, 40.0);
+        i.color = config::parse_color(&cfg.ink.color).unwrap_or(annot::PALETTE[0]);
         // Runs when the [ink] section changes: the config is the source of truth again.
         i.rings_on = cfg.ink.click_rings;
         i.keys_on = cfg.ink.show_keys;
@@ -296,12 +309,16 @@ fn register_hotkeys(cfg: &config::Config) {
                 let mods = HOT_KEY_MODIFIERS(hk.mods) | MOD_NOREPEAT;
                 match RegisterHotKey(Some(hwnd), id, mods, hk.vk) {
                     Ok(()) => log::info!("hotkey {name} = {spec}"),
-                    Err(e) => log::warn!("hotkey {name} = {spec} not registered: {e}"),
+                    Err(e) => {
+                        log::warn!("hotkey {name} = {spec} not registered: {e}");
+                        failed.push(spec.to_string());
+                    }
                 }
             },
             Err(e) => log::error!("hotkey {name}: {e}"),
         }
     }
+    settings::set_failed_hotkeys(failed);
 }
 
 fn set_autostart(on: bool) {
@@ -403,7 +420,8 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) 
             }
             WM_COMMAND => {
                 match wp.0 & 0xFFFF {
-                    MENU_SETTINGS => shell_open(&config::config_path()),
+                    MENU_SETTINGS => settings::open(),
+                    MENU_CONFIG => shell_open(&config::config_path()),
                     MENU_HISTORY => {
                         let dir = config::app_dir().join("history");
                         let _ = std::fs::create_dir_all(&dir);
@@ -584,7 +602,7 @@ fn on_ink(kind: usize, lp: LPARAM) {
                     Ok(_) => log::info!("dictation: nothing recognised"),
                     Err(e) => {
                         log::error!("dictation failed: {e}");
-                        notify("Shelf", "Р”РёРєС‚РѕРІРєР° РЅРµ СѓРґР°Р»Р°СЃСЊ вЂ” РїРѕРґСЂРѕР±РЅРѕСЃС‚Рё РІ Р»РѕРіРµ");
+                        notify("Shelf", "Диктовка не удалась — подробности в логе");
                     }
                 }
             });
@@ -652,17 +670,17 @@ pub fn ocr_to_clipboard(img: std::sync::Arc<clipboard::Image>) {
             Ok(text) if !text.trim().is_empty() => {
                 clipboard::set_text(main_hwnd(), &text);
             }
-            Ok(_) => notify("Shelf", "РўРµРєСЃС‚ РЅРµ РЅР°Р№РґРµРЅ"),
+            Ok(_) => notify("Shelf", "Текст не найден"),
             Err(ocr::OcrError::NoLanguages) => {
                 log::warn!("OCR: no ru/en recognizer installed");
                 notify(
-                    "Shelf: OCR РЅРµРґРѕСЃС‚СѓРїРµРЅ",
-                    "РќРµС‚ СЏР·С‹РєРѕРІРѕРіРѕ РїР°РєРµС‚Р° СЂР°СЃРїРѕР·РЅР°РІР°РЅРёСЏ (ru/en). РџР°СЂР°РјРµС‚СЂС‹ в†’ Р’СЂРµРјСЏ Рё СЏР·С‹Рє в†’ РЇР·С‹Рє в†’ РґРѕР±Р°РІСЊС‚Рµ СЏР·С‹Рє СЃ РєРѕРјРїРѕРЅРµРЅС‚РѕРј В«РћРїС‚РёС‡РµСЃРєРѕРµ СЂР°СЃРїРѕР·РЅР°РІР°РЅРёРµВ».",
+                    "Shelf: OCR недоступен",
+                    "Нет языкового пакета распознавания (ru/en). Параметры → Время и язык → Язык → добавьте язык с компонентом «Оптическое распознавание».",
                 );
             }
             Err(ocr::OcrError::Failed(e)) => {
                 log::error!("OCR failed: {e}");
-                notify("Shelf", "РќРµ СѓРґР°Р»РѕСЃСЊ СЂР°СЃРїРѕР·РЅР°С‚СЊ С‚РµРєСЃС‚");
+                notify("Shelf", "Не удалось распознать текст");
             }
         });
     });
@@ -680,10 +698,10 @@ fn send_paste() {
 
 fn show_model_help(hwnd: HWND) {
     let dir = dictation::default_model_path();
-    let text = dictation::MODEL_HELP.replace("{path}", &dir.display().to_string()) + "\n\nРћС‚РєСЂС‹С‚СЊ РїР°РїРєСѓ РґР»СЏ РјРѕРґРµР»Рё?";
+    let text = dictation::MODEL_HELP.replace("{path}", &dir.display().to_string()) + "\n\nОткрыть папку для модели?";
     let w: Vec<u16> = text.encode_utf16().chain(Some(0)).collect();
     unsafe {
-        let r = MessageBoxW(Some(hwnd), PCWSTR(w.as_ptr()), w!("Shelf вЂ” РјРѕРґРµР»СЊ РґРёРєС‚РѕРІРєРё"), MB_OKCANCEL | MB_ICONINFORMATION);
+        let r = MessageBoxW(Some(hwnd), PCWSTR(w.as_ptr()), w!("Shelf — модель диктовки"), MB_OKCANCEL | MB_ICONINFORMATION);
         if r == IDOK {
             if let Some(parent) = dir.parent() {
                 let _ = std::fs::create_dir_all(parent);

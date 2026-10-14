@@ -873,12 +873,21 @@ impl Overlay {
         self.commit_text();
         let bgra = self.render_output(&target)?;
         let img = Arc::new(Image { w: target.w() as u32, h: target.h() as u32, bgra });
+        let t_crop = t0.elapsed();
         self.hide();
+        let t_hide = t0.elapsed();
         let owner = self.owner;
         match action {
             Finish::Copy => {
                 let ok = clipboard::set_image(owner, img.clone());
-                log::info!("metric: ctrl+c->clipboard {:.1} ms ({}x{}, ok={ok})", t0.elapsed().as_secs_f64() * 1000.0, target.w(), target.h());
+                log::info!(
+                    "metric: ctrl+c->clipboard {:.1} ms (crop {:.1}, hide {:.1}; {}x{}, ok={ok})",
+                    t0.elapsed().as_secs_f64() * 1000.0,
+                    t_crop.as_secs_f64() * 1000.0,
+                    t_hide.as_secs_f64() * 1000.0,
+                    target.w(),
+                    target.h()
+                );
                 history::add_async(img, "capture");
                 None
             }

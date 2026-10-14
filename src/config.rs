@@ -92,6 +92,8 @@ pub struct Ink {
     /// Delay before a stroke starts to fade, in milliseconds.
     pub fade_ms: u64,
     pub width: f32,
+    /// Default ink color, "#RRGGBB" (1-8 switch it while drawing).
+    pub color: String,
     // Explanation tools. The laser is the hold key pressed together with Ctrl.
     pub spotlight: String,
     pub zoom: String,
@@ -111,6 +113,7 @@ impl Default for Ink {
             clear: "Ctrl+Alt+Backspace".into(),
             fade_ms: 2500,
             width: 4.0,
+            color: "#E53935".into(),
             spotlight: "Ctrl+Alt+S".into(),
             zoom: "Ctrl+Alt+Z".into(),
             click_rings_toggle: "Ctrl+Alt+C".into(),
@@ -297,6 +300,7 @@ clear = "Ctrl+Alt+Backspace"
 # Strokes fade this many milliseconds after release
 fade_ms = 2500
 width = 4.0
+color = "#E53935"
 # Explanation tools: hold Ctrl+<hold key> for the laser pointer,
 # click while drawing for numbered markers. Esc leaves spotlight and zoom.
 spotlight = "Ctrl+Alt+S"
