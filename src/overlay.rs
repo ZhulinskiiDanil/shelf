@@ -748,8 +748,13 @@ impl Overlay {
         }
     }
 
+    /// Also applies to the shape being drawn right now, so the wheel thickens a line
+    /// mid-stroke (as in Lightshot).
     fn set_width(&mut self, delta: f32) {
         self.width = (self.width + delta).clamp(1.0, 40.0);
+        if let Some(p) = self.pending.as_mut() {
+            p.width = self.width;
+        }
         self.redraw();
     }
 

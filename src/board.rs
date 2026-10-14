@@ -246,6 +246,15 @@ impl Board {
         }
     }
 
+    /// Changes the width, including the shape being drawn right now (as in Lightshot).
+    fn set_width(&mut self, delta: f32) {
+        self.width = (self.width + delta).clamp(1.0, 40.0);
+        if let Some(p) = self.pending.as_mut() {
+            p.width = self.width;
+        }
+        self.render();
+    }
+
     /// Single-key tool, color and width shortcuts (same as capture markup).
     fn key(&mut self, vk: VIRTUAL_KEY) -> bool {
         let keys = crate::config::current().tools.tool_keys();
@@ -255,9 +264,9 @@ impl Board {
         } else if (0x31..=0x38).contains(&vk.0) {
             self.color = annot::PALETTE[(vk.0 - 0x31) as usize];
         } else if vk == VK_OEM_4 || vk == VK_OEM_MINUS {
-            self.width = (self.width - 1.0).max(1.0);
+            self.set_width(-1.0);
         } else if vk == VK_OEM_6 || vk == VK_OEM_PLUS {
-            self.width = (self.width + 1.0).min(40.0);
+            self.set_width(1.0);
         } else {
             return false;
         }
@@ -412,10 +421,7 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) 
             }
             WM_MOUSEWHEEL => {
                 let up = (wp.0 >> 16) as u16 as i16 > 0;
-                with(|b| {
-                    b.width = (b.width + if up { 1.0 } else { -1.0 }).clamp(1.0, 40.0);
-                    b.render();
-                });
+                with(|b| b.set_width(if up { 1.0 } else { -1.0 }));
                 LRESULT(0)
             }
             WM_KEYDOWN => {
