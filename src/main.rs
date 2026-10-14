@@ -15,6 +15,7 @@ mod imageio;
 mod ink;
 mod logger;
 mod names;
+mod ocr;
 mod overlay;
 mod shelf;
 
@@ -37,6 +38,9 @@ const WM_APP_QUIT: u32 = WM_APP + 2;
 const WM_APP_RELOAD: u32 = WM_APP + 3;
 const WM_APP_CAPTURE: u32 = WM_APP + 4;
 const WM_APP_INK: u32 = WM_APP + 5;
+const WM_APP_CALL: u32 = WM_APP + 6;
+
+static MAIN_HWND: std::sync::atomic::AtomicIsize = std::sync::atomic::AtomicIsize::new(0);
 
 const MENU_SETTINGS: usize = 1;
 const MENU_HISTORY: usize = 2;
@@ -111,6 +115,7 @@ fn main() {
         .unwrap();
 
         let taskbar_created = RegisterWindowMessageW(w!("TaskbarCreated"));
+        MAIN_HWND.store(hwnd.0 as isize, std::sync::atomic::Ordering::Relaxed);
         APP.with(|a| *a.borrow_mut() = Some(App { hwnd, config: cfg.clone(), taskbar_created }));
 
         add_tray_icon(hwnd);
@@ -397,6 +402,11 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) 
                 on_hotkey(wp.0 as i32);
                 LRESULT(0)
             }
+            WM_APP_CALL => {
+                let f = Box::from_raw(lp.0 as *mut Box<dyn FnOnce() + Send>);
+                f();
+                LRESULT(0)
+            }
             WM_APP_INK => {
                 on_ink(wp.0, lp);
                 LRESULT(0)
@@ -538,4 +548,67 @@ fn on_ink(kind: usize, lp: LPARAM) {
 fn sync_ink_features() {
     let bits = ink::with(|i| i.feature_bits()).unwrap_or(0);
     hook::set_features(bits);
+}
+
+// ! --- Helpers for background work --- !
+
+pub fn main_hwnd() -> HWND {
+    HWND(MAIN_HWND.load(std::sync::atomic::Ordering::Relaxed) as _)
+}
+
+/// Runs `f` on the UI thread (clipboard ownership, windows).
+pub fn run_on_main(f: impl FnOnce() + Send + 'static) {
+    let b: Box<Box<dyn FnOnce() + Send>> = Box::new(Box::new(f));
+    let p = Box::into_raw(b);
+    unsafe {
+        if PostMessageW(Some(main_hwnd()), WM_APP_CALL, WPARAM(0), LPARAM(p as isize)).is_err() {
+            drop(Box::from_raw(p));
+        }
+    }
+}
+
+/// A small, silent tray balloon. Used only for things the user asked for that failed
+/// or produced nothing (never after a normal capture).
+pub fn notify(title: &str, text: &str) {
+    let hwnd = main_hwnd();
+    let mut nid = tray_data(hwnd);
+    nid.uFlags = NIF_INFO;
+    nid.dwInfoFlags = NIIF_INFO | NIIF_NOSOUND;
+    for (dst, src) in [(&mut nid.szInfoTitle[..], title), (&mut nid.szInfo[..], text)] {
+        let w: Vec<u16> = src.encode_utf16().take(dst.len() - 1).collect();
+        dst[..w.len()].copy_from_slice(&w);
+        dst[w.len()] = 0;
+    }
+    unsafe {
+        let _ = Shell_NotifyIconW(NIM_MODIFY, &nid);
+    }
+}
+
+/// OCR on a worker thread, result to the clipboard as text.
+pub fn ocr_to_clipboard(img: std::sync::Arc<clipboard::Image>) {
+    std::thread::spawn(move || {
+        unsafe {
+            let _ = windows::Win32::System::Com::CoInitializeEx(None, windows::Win32::System::Com::COINIT_MULTITHREADED);
+        }
+        let t0 = std::time::Instant::now();
+        let res = ocr::recognize(&img);
+        log::info!("ocr {}x{} in {:.0} ms", img.w, img.h, t0.elapsed().as_secs_f64() * 1000.0);
+        run_on_main(move || match res {
+            Ok(text) if !text.trim().is_empty() => {
+                clipboard::set_text(main_hwnd(), &text);
+            }
+            Ok(_) => notify("Shelf", "Текст не найден"),
+            Err(ocr::OcrError::NoLanguages) => {
+                log::warn!("OCR: no ru/en recognizer installed");
+                notify(
+                    "Shelf: OCR недоступен",
+                    "Нет языкового пакета распознавания (ru/en). Параметры → Время и язык → Язык → добавьте язык с компонентом «Оптическое распознавание».",
+                );
+            }
+            Err(ocr::OcrError::Failed(e)) => {
+                log::error!("OCR failed: {e}");
+                notify("Shelf", "Не удалось распознать текст");
+            }
+        });
+    });
 }

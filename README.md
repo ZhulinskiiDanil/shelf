@@ -33,6 +33,7 @@ cargo test
 | Capture | `Ctrl+S` | Quick save to configured folder |
 | Capture | `Ctrl+Shift+S` | Save as… |
 | Capture | `Ctrl+D` | Attach file to cursor, click to drop (`Esc` cancels) |
+| Capture | `Ctrl+T` | Recognize text (OCR) and copy it |
 | Capture | `Esc`, right click | Cancel |
 | Capture | `P` `L` `A` `R` `E` `M` `T` `B` `N` | Pen, line, arrow, rectangle, ellipse, marker, text, pixelate, numbered marker |
 | Capture | `1`–`8` | Color |
@@ -44,7 +45,7 @@ cargo test
 | Shelf | Click, `Ctrl`/`Shift`+click, `Ctrl+A`, arrows | Select |
 | Shelf | Drag | Drag files out (closes the shelf on drop) |
 | Shelf | `Ctrl+C` · `Ctrl+Shift+C` | Copy image · copy quoted paths |
-| Shelf | `P` · `Del` · `O` · `Enter` | Pin · delete · show in folder · open |
+| Shelf | `T` · `P` · `Del` · `O` · `Enter` | Copy text (OCR) · pin · delete · show in folder · open |
 | Shelf | `Esc`, click outside | Close |
 | Global | Hold `Caps Lock` (or a mouse side button) | Draw on screen; strokes fade after 2.5 s |
 | Ink | Hold `Shift` while drawing | Keep the stroke until cleared |

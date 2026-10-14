@@ -47,6 +47,7 @@ pub enum Finish {
     Save,
     SaveAs,
     Drag,
+    Ocr,
 }
 
 struct Gfx {
@@ -906,6 +907,11 @@ impl Overlay {
                 }
                 history::add_async(img, "capture");
             })),
+            Finish::Ocr => {
+                crate::ocr_to_clipboard(img.clone());
+                history::add_async(img, "capture");
+                None
+            }
             Finish::Drag => Some(Box::new(move || {
                 if let Some(p) = history::add(&img, "capture") {
                     crate::dragdrop::drag_files(&[p], Some(&img), true);
@@ -1017,6 +1023,7 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) 
                     VK_C if ctrl => finish(if shift { Finish::CopyPath } else { Finish::Copy }, t0),
                     VK_S if ctrl => finish(if shift { Finish::SaveAs } else { Finish::Save }, t0),
                     VK_D if ctrl => finish(Finish::Drag, t0),
+                    VK_T if ctrl => finish(Finish::Ocr, t0),
                     _ => {}
                 }
                 LRESULT(0)
