@@ -5,7 +5,9 @@ mod audio;
 mod board;
 mod capture;
 mod clipwatch;
+mod chip;
 mod clipboard;
+mod clipkind;
 mod config;
 mod dictation;
 mod dragdrop;
@@ -63,6 +65,7 @@ pub const HK_RINGS: i32 = 7;
 pub const HK_KEYS: i32 = 8;
 pub const HK_BOARD: i32 = 9;
 pub const HK_REC_STOP: i32 = 10;
+pub const HK_CHIP: i32 = 11;
 
 struct App {
     hwnd: HWND,
@@ -131,6 +134,7 @@ fn main() {
         overlay::init(hwnd, cfg.capture.magnifier);
         shelf::init();
         board::init();
+        chip::init();
         settings::init();
         ink::init();
         hook::set_ink_msg(WM_APP_INK);
@@ -240,16 +244,17 @@ fn apply_config(cfg: &config::Config, old: Option<&config::Config>) {
     config::set_current(cfg);
     history::set_template(&cfg.save.filename);
     history::set_limits(cfg.history.max_items, cfg.history.max_mb);
-    if old.map(|o| o.history.watch_clipboard) != Some(cfg.history.watch_clipboard) {
+    let listen = |c: &config::Config| (c.history.watch_clipboard, c.clipboard_chip.enabled);
+    if old.map(listen) != Some(listen(cfg)) {
         let hwnd = APP.with(|a| a.borrow().as_ref().unwrap().hwnd);
-        clipwatch::set_enabled(hwnd, cfg.history.watch_clipboard);
+        clipwatch::set_enabled(hwnd, cfg.history.watch_clipboard, cfg.history.watch_clipboard || cfg.clipboard_chip.enabled);
     }
     if old.map(|o| o.autostart) != Some(cfg.autostart) {
         set_autostart(cfg.autostart);
     }
     overlay::set_magnifier(cfg.capture.magnifier);
     board::configure(cfg.board.opacity, config::parse_color(&cfg.board.background).unwrap_or(0x1E1E1E));
-    if old.map(|o| (&o.hotkeys, &o.ink, &o.board.hotkey, &o.dictation.hold, &o.record.stop)) != Some((&cfg.hotkeys, &cfg.ink, &cfg.board.hotkey, &cfg.dictation.hold, &cfg.record.stop)) {
+    if old.map(|o| (&o.hotkeys, &o.ink, &o.board.hotkey, &o.dictation.hold, &o.record.stop, &o.clipboard_chip)) != Some((&cfg.hotkeys, &cfg.ink, &cfg.board.hotkey, &cfg.dictation.hold, &cfg.record.stop, &cfg.clipboard_chip)) {
         register_hotkeys(cfg);
     }
     sync_ink_features();
@@ -258,6 +263,8 @@ fn apply_config(cfg: &config::Config, old: Option<&config::Config>) {
 fn register_hotkeys(cfg: &config::Config) {
     let hwnd = APP.with(|a| a.borrow().as_ref().unwrap().hwnd);
     let mut failed = Vec::new();
+    // A config change ends a temporary on/off made with the chip hotkey.
+    chip::ENABLED.store(true, std::sync::atomic::Ordering::Relaxed);
     for c in settings_model::global_conflicts(cfg) {
         log::warn!("hotkey conflict: {c}");
     }
@@ -300,6 +307,7 @@ fn register_hotkeys(cfg: &config::Config) {
         (HK_KEYS, "show keys", &cfg.ink.keys_toggle),
         (HK_BOARD, "board", &cfg.board.hotkey),
         (HK_REC_STOP, "record stop", &cfg.record.stop),
+        (HK_CHIP, "clipboard chip", &cfg.clipboard_chip.toggle),
     ] {
         unsafe {
             let _ = UnregisterHotKey(Some(hwnd), id);
@@ -382,6 +390,14 @@ fn on_hotkey(id: i32) {
         HK_SHELF => shelf::toggle(),
         HK_BOARD => board::toggle(),
         HK_REC_STOP => stop_recording(),
+        HK_CHIP => {
+            use std::sync::atomic::Ordering;
+            let on = !chip::ENABLED.fetch_xor(true, Ordering::Relaxed);
+            log::info!("clipboard chip = {on}");
+            let p = cursor();
+            let text = if on { "Чип буфера обмена: вкл" } else { "Чип буфера обмена: выкл" };
+            chip::show(chip::Content::Notice(text.into()), p);
+        }
         HK_INK_STICKY => set_ink_sticky(!hook::STICKY.load(std::sync::atomic::Ordering::Relaxed)),
         HK_INK_CLEAR => {
             ink::with(|i| i.clear());
@@ -463,6 +479,7 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) 
             }
             WM_CLIPBOARDUPDATE => {
                 clipwatch::on_update(hwnd);
+                chip::on_update();
                 LRESULT(0)
             }
             WM_DESTROYCLIPBOARD => {

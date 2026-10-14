@@ -10,14 +10,19 @@ use windows::core::w;
 
 static LAST_HASH: Mutex<u64> = Mutex::new(0);
 
-pub fn set_enabled(hwnd: HWND, on: bool) {
+static WATCH: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// `watch`: save copied images to history. `listen`: receive WM_CLIPBOARDUPDATE at all
+/// (also needed by the clipboard chip).
+pub fn set_enabled(hwnd: HWND, watch: bool, listen: bool) {
+    WATCH.store(watch, std::sync::atomic::Ordering::Relaxed);
     unsafe {
         let _ = RemoveClipboardFormatListener(hwnd);
-        if on {
+        if listen {
             let _ = AddClipboardFormatListener(hwnd);
         }
     }
-    log::info!("clipboard watch = {on}");
+    log::info!("clipboard watch = {watch}, listener = {listen}");
 }
 
 fn read_format(fmt: u32) -> Option<Vec<u8>> {
@@ -36,6 +41,9 @@ fn read_format(fmt: u32) -> Option<Vec<u8>> {
 
 /// WM_CLIPBOARDUPDATE. Copies the raw bytes on the UI thread (fast), decodes and saves on the worker.
 pub fn on_update(own: HWND) {
+    if !WATCH.load(std::sync::atomic::Ordering::Relaxed) {
+        return;
+    }
     unsafe {
         if GetClipboardOwner().ok() == Some(own) || IsClipboardFormatAvailable(CF_HDROP.0 as u32).is_ok() {
             return;

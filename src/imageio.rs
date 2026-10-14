@@ -85,6 +85,47 @@ pub fn dib_to_image(dib: &[u8]) -> Option<Image> {
     Some(Image { w: w as u32, h: hu as u32, bgra })
 }
 
+/// Nearest-neighbour thumbnail straight from a packed CF_DIB, without converting the
+/// whole image (a huge clipboard bitmap is sampled, not copied). Same formats as dib_to_image.
+/// Returns the thumbnail and the original size.
+pub fn dib_thumbnail(dib: &[u8], max_w: u32, max_h: u32) -> Option<(Image, u32, u32)> {
+    let rd_u32 = |o: usize| dib.get(o..o + 4).map(|b| u32::from_le_bytes(b.try_into().unwrap()));
+    let hdr_size = rd_u32(0)? as usize;
+    let w = rd_u32(4)? as i32;
+    let h = rd_u32(8)? as i32;
+    let bpp = u16::from_le_bytes(dib.get(14..16)?.try_into().ok()?);
+    let compression = rd_u32(16)?;
+    let clr_used = rd_u32(32)? as usize;
+    if w <= 0 || h == 0 || w > 65535 || h.abs() > 65535 {
+        return None;
+    }
+    let mut off = hdr_size;
+    match (compression, bpp) {
+        (0, 24) | (0, 32) => off += clr_used * 4,
+        (3, 32) if hdr_size == 40 => off += 12,
+        (3, 32) => {}
+        _ => return None,
+    }
+    let (wu, hu) = (w as usize, h.unsigned_abs() as usize);
+    let bypp = bpp as usize / 8;
+    let stride = (wu * bypp + 3) & !3;
+    if dib.len() < off + stride * hu {
+        return None;
+    }
+    let s = (max_w as f64 / wu as f64).min(max_h as f64 / hu as f64).min(1.0);
+    let (tw, th) = (((wu as f64 * s) as usize).max(1), ((hu as f64 * s) as usize).max(1));
+    let mut bgra = Vec::with_capacity(tw * th * 4);
+    for ty in 0..th {
+        let sy = ty * hu / th;
+        let row = if h > 0 { hu - 1 - sy } else { sy };
+        for tx in 0..tw {
+            let i = off + row * stride + (tx * wu / tw) * bypp;
+            bgra.extend_from_slice(&[dib[i], dib[i + 1], dib[i + 2], 255]);
+        }
+    }
+    Some((Image { w: tw as u32, h: th as u32, bgra }, wu as u32, hu as u32))
+}
+
 /// Box-filter downscale so the result fits in max_w × max_h (never upscales).
 pub fn thumbnail(img: &Image, max_w: u32, max_h: u32) -> Image {
     let s = (max_w as f64 / img.w as f64).min(max_h as f64 / img.h as f64).min(1.0);

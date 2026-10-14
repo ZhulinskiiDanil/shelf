@@ -15,6 +15,37 @@ pub struct Config {
     pub board: Board,
     pub dictation: Dictation,
     pub record: Record,
+    pub clipboard_chip: ClipboardChip,
+}
+
+/// M12: a short chip near the cursor showing what was just copied.
+#[derive(Debug, Clone, Deserialize, PartialEq)]
+#[serde(default)]
+pub struct ClipboardChip {
+    pub enabled: bool,
+    /// Global hotkey that turns the chip on/off until the next config change.
+    pub toggle: String,
+    /// How long the chip stays, in milliseconds.
+    pub duration_ms: u64,
+    /// Fade-out length in milliseconds; 0 = disappear at once.
+    pub fade_ms: u64,
+    /// Also show the chip for copies made by Shelf itself.
+    pub show_own: bool,
+    /// Executable names (e.g. "KeePass.exe") whose copies never show a chip.
+    pub ignore_processes: Vec<String>,
+}
+
+impl Default for ClipboardChip {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            toggle: "Ctrl+Alt+X".into(),
+            duration_ms: 1200,
+            fade_ms: 0,
+            show_own: true,
+            ignore_processes: ["KeePass.exe", "KeePassXC.exe", "1Password.exe", "Bitwarden.exe"].map(String::from).to_vec(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Deserialize, PartialEq)]
@@ -237,7 +268,7 @@ pub struct Hotkeys {
 
 impl Default for Config {
     fn default() -> Self {
-        Self { log_level: "info".into(), autostart: false, hotkeys: Hotkeys::default(), capture: Capture::default(), save: Save::default(), tools: Tools::default(), history: History::default(), ink: Ink::default(), board: Board::default(), dictation: Dictation::default(), record: Record::default() }
+        Self { log_level: "info".into(), autostart: false, hotkeys: Hotkeys::default(), capture: Capture::default(), save: Save::default(), tools: Tools::default(), history: History::default(), ink: Ink::default(), board: Board::default(), dictation: Dictation::default(), record: Record::default(), clipboard_chip: ClipboardChip::default() }
     }
 }
 
@@ -332,6 +363,19 @@ unload_after_min = 5
 stop = "Ctrl+Alt+R"
 fps = 30
 cursor = true
+
+# A short chip next to the cursor showing what was just copied (in any app)
+[clipboard_chip]
+enabled = true
+# Turn the chip on/off
+toggle = "Ctrl+Alt+X"
+duration_ms = 1200
+# Fade-out in ms when hiding; 0 = disappear at once
+fade_ms = 0
+# Also for copies made by Shelf itself
+show_own = true
+# Never show the chip for copies from these programs
+ignore_processes = ["KeePass.exe", "KeePassXC.exe", "1Password.exe", "Bitwarden.exe"]
 "##;
 
 pub fn app_dir() -> PathBuf {
@@ -440,7 +484,7 @@ mod tests {
         assert_eq!(parse(DEFAULT_TOML).unwrap(), Config::default());
         // Every section must be spelled out, so users see all options in the generated file.
         let t: toml::Table = toml::from_str(DEFAULT_TOML).unwrap();
-        for s in ["hotkeys", "capture", "save", "tools", "history", "ink", "board", "dictation", "record"] {
+        for s in ["hotkeys", "capture", "save", "tools", "history", "ink", "board", "dictation", "record", "clipboard_chip"] {
             assert!(t.contains_key(s), "DEFAULT_TOML lacks [{s}]");
         }
     }

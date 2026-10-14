@@ -18,6 +18,8 @@ pub enum Kind {
     Int,
     Float,
     Color,
+    /// Comma-separated list stored as a TOML array of strings.
+    List,
 }
 
 pub struct Field {
@@ -32,7 +34,7 @@ const fn f(page: &'static str, section: &'static str, key: &'static str, label: 
     Field { page, section, key, label, kind }
 }
 
-pub const PAGES: [&str; 7] = ["Общие", "Хоткеи", "Захват", "Инструменты", "Рисование", "Диктовка", "Запись"];
+pub const PAGES: [&str; 8] = ["Общие", "Хоткеи", "Захват", "Инструменты", "Рисование", "Диктовка", "Запись", "Буфер"];
 
 pub const FIELDS: &[Field] = &[
     f("Общие", "", "autostart", "Запускать вместе с Windows", Kind::Bool),
@@ -52,6 +54,7 @@ pub const FIELDS: &[Field] = &[
     f("Хоткеи", "board", "hotkey", "Доска", Kind::Hotkey),
     f("Хоткеи", "dictation", "hold", "Диктовка (удерживать)", Kind::Hotkey),
     f("Хоткеи", "record", "stop", "Остановить запись", Kind::Hotkey),
+    f("Хоткеи", "clipboard_chip", "toggle", "Чип буфера вкл/выкл", Kind::Hotkey),
     f("Захват", "capture", "magnifier", "Лупа у курсора", Kind::Bool),
     f("Захват", "save", "dir", "Папка для Ctrl+S (пусто = Изображения\\Shelf)", Kind::Path),
     f("Захват", "save", "filename", "Шаблон имени (%Y %m %d %H %M %S)", Kind::Text),
@@ -78,6 +81,11 @@ pub const FIELDS: &[Field] = &[
     f("Диктовка", "dictation", "unload_after_min", "Выгружать модель через, мин", Kind::Int),
     f("Запись", "record", "fps", "Кадров в секунду", Kind::Int),
     f("Запись", "record", "cursor", "Показывать курсор", Kind::Bool),
+    f("Буфер", "clipboard_chip", "enabled", "Показывать чип при копировании", Kind::Bool),
+    f("Буфер", "clipboard_chip", "duration_ms", "Сколько показывать, мс", Kind::Int),
+    f("Буфер", "clipboard_chip", "fade_ms", "Затухание, мс (0 — без него)", Kind::Int),
+    f("Буфер", "clipboard_chip", "show_own", "Показывать для копий из Shelf", Kind::Bool),
+    f("Буфер", "clipboard_chip", "ignore_processes", "Не показывать для программ (через запятую)", Kind::List),
 ];
 
 /// Current value of a field from the effective config, as text for the editor.
@@ -115,6 +123,12 @@ pub fn read(c: &config::Config, fl: &Field) -> String {
         ("record", "stop") => c.record.stop.clone(),
         ("record", "fps") => c.record.fps.to_string(),
         ("record", "cursor") => b(c.record.cursor),
+        ("clipboard_chip", "enabled") => b(c.clipboard_chip.enabled),
+        ("clipboard_chip", "toggle") => c.clipboard_chip.toggle.clone(),
+        ("clipboard_chip", "duration_ms") => c.clipboard_chip.duration_ms.to_string(),
+        ("clipboard_chip", "fade_ms") => c.clipboard_chip.fade_ms.to_string(),
+        ("clipboard_chip", "show_own") => b(c.clipboard_chip.show_own),
+        ("clipboard_chip", "ignore_processes") => c.clipboard_chip.ignore_processes.join(", "),
         ("capture", "magnifier") => b(c.capture.magnifier),
         ("save", "dir") => c.save.dir.clone(),
         ("save", "filename") => c.save.filename.clone(),
@@ -168,6 +182,13 @@ pub fn parse(fl: &Field, text: &str) -> Result<Item, String> {
                 Ok(_) => err("одна клавиша без модификаторов"),
                 Err(e) => err(&e),
             }
+        }
+        Kind::List => {
+            let mut a = toml_edit::Array::new();
+            for item in t.split(',').map(str::trim).filter(|s| !s.is_empty()) {
+                a.push(item);
+            }
+            Ok(value(a))
         }
         Kind::Text | Kind::Path => Ok(value(t)),
     }

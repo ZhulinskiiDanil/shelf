@@ -8,6 +8,7 @@ A fast, fully offline screenshot tool for Windows 10/11: a Lightshot replacement
 - **Board** — a translucent canvas for sketching; saved to the shelf.
 - **Dictation** — hold a key, speak, get text (local Whisper model).
 - **Recording** — any area to MP4.
+- **Clipboard chip** — whatever you copy anywhere (color, link, file, JSON, image, text, code) briefly shows next to the cursor; secrets are masked.
 
 ## Install
 
@@ -38,6 +39,7 @@ All hotkeys are defaults and can be changed in Settings, which also reports conf
 | `Ctrl+Alt+B` | Thinking board | `board.hotkey` |
 | Hold `Ctrl+Alt+V` | Dictation: record while held, text to the clipboard on release | `dictation.hold` |
 | `Ctrl+Alt+R` | Stop area recording | `record.stop` |
+| `Ctrl+Alt+X` | Toggle the clipboard chip (what was just copied, shown next to the cursor) | `clipboard_chip.toggle` |
 
 ### Capture mode (after `PrtScrn`)
 
