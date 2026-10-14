@@ -11,6 +11,46 @@ pub struct Config {
     pub save: Save,
     pub tools: Tools,
     pub history: History,
+    pub ink: Ink,
+}
+
+#[derive(Debug, Clone, Deserialize, PartialEq)]
+#[serde(default)]
+pub struct Ink {
+    /// Hold to draw: a key ("CapsLock") or a mouse side button ("XButton1" / "XButton2").
+    pub hold: String,
+    /// Holding this while drawing keeps the stroke until cleared: "Shift", "Ctrl" or "Alt".
+    pub keep_modifier: String,
+    /// Toggle drawing without holding (left button draws; Esc exits).
+    pub sticky: String,
+    pub clear: String,
+    /// Delay before a stroke starts to fade, in milliseconds.
+    pub fade_ms: u64,
+    pub width: f32,
+}
+
+impl Default for Ink {
+    fn default() -> Self {
+        Self {
+            hold: "CapsLock".into(),
+            keep_modifier: "Shift".into(),
+            sticky: "Ctrl+Alt+D".into(),
+            clear: "Ctrl+Alt+Backspace".into(),
+            fade_ms: 2500,
+            width: 4.0,
+        }
+    }
+}
+
+impl Ink {
+    /// Virtual key of `keep_modifier`.
+    pub fn keep_vk(&self) -> u16 {
+        match self.keep_modifier.trim().to_ascii_lowercase().as_str() {
+            "ctrl" | "control" => 0x11,
+            "alt" => 0x12,
+            _ => 0x10,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Deserialize, PartialEq)]
@@ -115,7 +155,7 @@ pub struct Hotkeys {
 
 impl Default for Config {
     fn default() -> Self {
-        Self { log_level: "info".into(), autostart: false, hotkeys: Hotkeys::default(), capture: Capture::default(), save: Save::default(), tools: Tools::default(), history: History::default() }
+        Self { log_level: "info".into(), autostart: false, hotkeys: Hotkeys::default(), capture: Capture::default(), save: Save::default(), tools: Tools::default(), history: History::default(), ink: Ink::default() }
     }
 }
 
@@ -146,6 +186,38 @@ magnifier = true
 dir = ""
 # File name template: %Y %m %d %H %M %S
 filename = "shelf_%Y-%m-%d_%H-%M-%S"
+
+# Markup tool keys in capture mode. Colors: 1-8, width: [ ] or mouse wheel.
+[tools]
+pen = "P"
+line = "L"
+arrow = "A"
+rect = "R"
+ellipse = "E"
+marker = "M"
+text = "T"
+blur = "B"
+number = "N"
+
+[history]
+# Also keep images copied by other apps
+watch_clipboard = true
+# Limits for unpinned captures; pinned ones are never removed
+max_items = 500
+max_mb = 2048
+
+# Drawing over the screen (visible in screen sharing)
+[ink]
+# Hold to draw: a key ("CapsLock") or a mouse side button ("XButton1" / "XButton2")
+hold = "CapsLock"
+# Hold while drawing to keep the stroke until cleared: Shift, Ctrl or Alt
+keep_modifier = "Shift"
+# Draw without holding: left button draws, Esc exits
+sticky = "Ctrl+Alt+D"
+clear = "Ctrl+Alt+Backspace"
+# Strokes fade this many milliseconds after release
+fade_ms = 2500
+width = 4.0
 "#;
 
 pub fn app_dir() -> PathBuf {
@@ -230,6 +302,7 @@ fn key_vk(key: &str) -> Option<u32> {
         "enter" | "return" => 0x0D,
         "esc" | "escape" => 0x1B,
         "tab" => 0x09,
+        "backspace" | "back" => 0x08,
         "capslock" => 0x14,
         "insert" => 0x2D,
         "delete" | "del" => 0x2E,
@@ -251,6 +324,11 @@ mod tests {
     #[test]
     fn default_toml_matches_defaults() {
         assert_eq!(parse(DEFAULT_TOML).unwrap(), Config::default());
+        // Every section must be spelled out, so users see all options in the generated file.
+        let t: toml::Table = toml::from_str(DEFAULT_TOML).unwrap();
+        for s in ["hotkeys", "capture", "save", "tools", "history", "ink"] {
+            assert!(t.contains_key(s), "DEFAULT_TOML lacks [{s}]");
+        }
     }
 
     #[test]
@@ -279,5 +357,6 @@ mod tests {
         assert!(parse_hotkey("Ctrl+Shift").is_err());
         assert!(parse_hotkey("A+B").is_err());
         assert!(parse_hotkey("F25").is_err());
+        assert_eq!(parse_hotkey("Ctrl+Alt+Backspace").unwrap(), Hotkey { mods: MOD_CONTROL | MOD_ALT, vk: 0x08 });
     }
 }

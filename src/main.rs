@@ -10,6 +10,7 @@ mod geom;
 mod history;
 mod hook;
 mod imageio;
+mod ink;
 mod logger;
 mod names;
 mod overlay;
@@ -33,6 +34,7 @@ const WM_APP_TRAY: u32 = WM_APP + 1;
 const WM_APP_QUIT: u32 = WM_APP + 2;
 const WM_APP_RELOAD: u32 = WM_APP + 3;
 const WM_APP_CAPTURE: u32 = WM_APP + 4;
+const WM_APP_INK: u32 = WM_APP + 5;
 
 const MENU_SETTINGS: usize = 1;
 const MENU_HISTORY: usize = 2;
@@ -40,6 +42,8 @@ const MENU_EXIT: usize = 3;
 
 // Hotkey ids
 pub const HK_SHELF: i32 = 2;
+pub const HK_INK_STICKY: i32 = 3;
+pub const HK_INK_CLEAR: i32 = 4;
 
 struct App {
     hwnd: HWND,
@@ -106,6 +110,8 @@ fn main() {
         hook::start(hwnd, WM_APP_CAPTURE);
         overlay::init(hwnd, cfg.capture.magnifier);
         shelf::init();
+        ink::init();
+        hook::set_ink_msg(WM_APP_INK);
         apply_config(&cfg, None);
         spawn_config_watcher(hwnd);
 
@@ -212,7 +218,7 @@ fn apply_config(cfg: &config::Config, old: Option<&config::Config>) {
         set_autostart(cfg.autostart);
     }
     overlay::set_magnifier(cfg.capture.magnifier);
-    if old.map(|o| &o.hotkeys) != Some(&cfg.hotkeys) {
+    if old.map(|o| (&o.hotkeys, &o.ink)) != Some((&cfg.hotkeys, &cfg.ink)) {
         register_hotkeys(cfg);
     }
 }
@@ -230,7 +236,18 @@ fn register_hotkeys(cfg: &config::Config) {
             log::error!("hotkey capture: {e}");
         }
     }
-    for (id, name, spec) in [(HK_SHELF, "shelf", &cfg.hotkeys.shelf)] {
+    if let Err(e) = hook::set_hold(&cfg.ink.hold) {
+        log::error!("ink hold: {e}");
+    }
+    ink::with(|i| {
+        i.fade_delay = std::time::Duration::from_millis(cfg.ink.fade_ms);
+        i.width = cfg.ink.width.clamp(1.0, 40.0);
+    });
+    for (id, name, spec) in [
+        (HK_SHELF, "shelf", &cfg.hotkeys.shelf),
+        (HK_INK_STICKY, "ink sticky", &cfg.ink.sticky),
+        (HK_INK_CLEAR, "ink clear", &cfg.ink.clear),
+    ] {
         unsafe {
             let _ = UnregisterHotKey(Some(hwnd), id);
         }
@@ -306,6 +323,10 @@ fn reload_config() {
 fn on_hotkey(id: i32) {
     match id {
         HK_SHELF => shelf::toggle(),
+        HK_INK_STICKY => set_ink_sticky(!hook::STICKY.load(std::sync::atomic::Ordering::Relaxed)),
+        HK_INK_CLEAR => {
+            ink::with(|i| i.clear());
+        }
         _ => {}
     }
 }
@@ -337,6 +358,10 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) 
             }
             WM_HOTKEY => {
                 on_hotkey(wp.0 as i32);
+                LRESULT(0)
+            }
+            WM_APP_INK => {
+                on_ink(wp.0, lp);
                 LRESULT(0)
             }
             WM_APP_CAPTURE => {
@@ -381,5 +406,58 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) 
                 DefWindowProcW(hwnd, msg, wp, lp)
             }
         }
+    }
+}
+
+// ! --- Screen ink --- !
+
+fn keep_held() -> bool {
+    let vk = config::current().ink.keep_vk();
+    unsafe { GetAsyncKeyState(vk as i32) < 0 }
+}
+
+fn cursor() -> (i32, i32) {
+    let mut pt = POINT::default();
+    unsafe {
+        let _ = GetCursorPos(&mut pt);
+    }
+    (pt.x, pt.y)
+}
+
+fn set_ink_sticky(on: bool) {
+    hook::set_sticky(on);
+    ink::with(|i| {
+        if !on {
+            i.end_with(keep_held());
+        }
+        i.sticky = on;
+        i.render();
+    });
+    log::info!("ink sticky = {on}");
+}
+
+fn on_ink(kind: usize, lp: LPARAM) {
+    match kind {
+        hook::INK_HOLD_DOWN => {
+            let (x, y) = cursor();
+            ink::with(|i| i.begin(x, y, keep_held()));
+        }
+        hook::INK_STICKY_DOWN => {
+            let (x, y) = hook::unpack(lp);
+            ink::with(|i| i.begin(x, y, keep_held()));
+        }
+        hook::INK_MOVE => {
+            let (x, y) = hook::unpack(lp);
+            ink::with(|i| i.add_point(x, y));
+        }
+        hook::INK_HOLD_UP | hook::INK_STICKY_UP => {
+            ink::with(|i| i.end_with(keep_held()));
+        }
+        hook::INK_COLOR => {
+            let idx = (lp.0 as usize).min(annot::PALETTE.len() - 1);
+            ink::with(|i| i.set_color(annot::PALETTE[idx]));
+        }
+        hook::INK_STICKY_OFF => set_ink_sticky(false),
+        _ => {}
     }
 }

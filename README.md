@@ -46,3 +46,8 @@ cargo test
 | Shelf | `Ctrl+C` · `Ctrl+Shift+C` | Copy image · copy quoted paths |
 | Shelf | `P` · `Del` · `O` · `Enter` | Pin · delete · show in folder · open |
 | Shelf | `Esc`, click outside | Close |
+| Global | Hold `Caps Lock` (or a mouse side button) | Draw on screen; strokes fade after 2.5 s |
+| Ink | Hold `Shift` while drawing | Keep the stroke until cleared |
+| Ink | `1`–`8` while drawing | Color |
+| Global | `Ctrl+Alt+Backspace` | Clear screen ink |
+| Global | `Ctrl+Alt+D` | Sticky draw mode (left button draws, `Esc` exits) |
