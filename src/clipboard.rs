@@ -181,3 +181,24 @@ mod tests {
         assert_eq!(s, "C:/a.mp4\0D:/b\0\0");
     }
 }
+
+/// Very large images (e.g. long scrolling captures) go to the clipboard as PNG only:
+/// a CF_DIB would be hundreds of megabytes.
+pub fn set_png_only(owner: HWND, img: &Image) -> bool {
+    let png = crate::imageio::encode_png(img, png::Compression::Fast);
+    let Some(h) = global_from(&[&png]) else { return false };
+    if !open(owner) {
+        return false;
+    }
+    unsafe {
+        let _ = EmptyClipboard();
+        let ok = SetClipboardData(png_format(), Some(HANDLE(h.0))).is_ok();
+        let _ = CloseClipboard();
+        ok
+    }
+}
+
+/// Above this, images are copied as PNG only.
+pub fn is_huge(img: &Image) -> bool {
+    img.h > 8000 || img.bgra.len() > 96 * 1024 * 1024
+}

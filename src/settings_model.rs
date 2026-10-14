@@ -20,6 +20,8 @@ pub enum Kind {
     Color,
     /// Comma-separated list stored as a TOML array of strings.
     List,
+    /// Shortcut inside capture mode (checked against the built-in capture shortcuts).
+    CaptureKey,
 }
 
 pub struct Field {
@@ -57,9 +59,15 @@ pub const FIELDS: &[Field] = &[
     f("Хоткеи", "clipboard_chip", "toggle", "Чип буфера вкл/выкл", Kind::Hotkey),
     f("Хоткеи", "text_history", "picker", "История текста (список)", Kind::Hotkey),
     f("Хоткеи", "text_history", "pause", "История текста: пауза", Kind::Hotkey),
+    f("Хоткеи", "scroll_capture", "key", "Длинный скриншот (в режиме выделения)", Kind::CaptureKey),
     f("Захват", "capture", "magnifier", "Лупа у курсора", Kind::Bool),
     f("Захват", "save", "dir", "Папка для Ctrl+S (пусто = Изображения\\Shelf)", Kind::Path),
     f("Захват", "save", "filename", "Шаблон имени (%Y %m %d %H %M %S)", Kind::Text),
+    f("Захват", "scroll_capture", "mode", "Длинный скриншот: режим (auto, manual)", Kind::Text),
+    f("Захват", "scroll_capture", "step", "Длинный скриншот: шаг колеса, щелчков", Kind::Int),
+    f("Захват", "scroll_capture", "settle_ms", "Длинный скриншот: пауза после шага, мс", Kind::Int),
+    f("Захват", "scroll_capture", "max_height", "Длинный скриншот: макс. высота, px", Kind::Int),
+    f("Захват", "scroll_capture", "restore_scroll", "Длинный скриншот: вернуть прокрутку", Kind::Bool),
     f("Инструменты", "tools", "pen", "Карандаш", Kind::Key),
     f("Инструменты", "tools", "line", "Линия", Kind::Key),
     f("Инструменты", "tools", "arrow", "Стрелка", Kind::Key),
@@ -137,6 +145,12 @@ pub fn read(c: &config::Config, fl: &Field) -> String {
         ("clipboard_chip", "show_own") => b(c.clipboard_chip.show_own),
         ("clipboard_chip", "ignore_processes") => c.clipboard_chip.ignore_processes.join(", "),
         ("text_history", "enabled") => b(c.text_history.enabled),
+        ("scroll_capture", "key") => c.scroll_capture.key.clone(),
+        ("scroll_capture", "mode") => c.scroll_capture.mode.clone(),
+        ("scroll_capture", "step") => c.scroll_capture.step.to_string(),
+        ("scroll_capture", "settle_ms") => c.scroll_capture.settle_ms.to_string(),
+        ("scroll_capture", "max_height") => c.scroll_capture.max_height.to_string(),
+        ("scroll_capture", "restore_scroll") => b(c.scroll_capture.restore_scroll),
         ("text_history", "picker") => c.text_history.picker.clone(),
         ("text_history", "pause") => c.text_history.pause.clone(),
         ("text_history", "max_items") => c.text_history.max_items.to_string(),
@@ -177,7 +191,7 @@ pub fn parse(fl: &Field, text: &str) -> Result<Item, String> {
             Some(_) => Ok(value(format!("#{}", t.trim_start_matches('#').to_ascii_uppercase()))),
             None => err("цвет в виде #RRGGBB"),
         },
-        Kind::Hotkey => match config::parse_hotkey(t) {
+        Kind::Hotkey | Kind::CaptureKey => match config::parse_hotkey(t) {
             Ok(_) => Ok(value(t)),
             Err(e) => err(&e),
         },
@@ -321,5 +335,23 @@ pub fn global_conflicts(c: &config::Config) -> Vec<String> {
         .collect();
     let names = ["Карандаш", "Линия", "Стрелка", "Прямоугольник", "Эллипс", "Маркер", "Текст", "Пикселизация", "Номера"];
     let keys: Vec<(&str, u32)> = names.iter().copied().zip(c.tools.tool_keys()).collect();
-    conflicts(&globals, &keys)
+    let mut out = conflicts(&globals, &keys);
+    // Capture-mode shortcuts: against the built-in ones and each other.
+    let builtin = ["Ctrl+C", "Ctrl+Shift+C", "Ctrl+S", "Ctrl+Shift+S", "Ctrl+D", "Ctrl+T", "Ctrl+R", "Ctrl+Z", "Ctrl+Y"];
+    let custom: Vec<(&str, Option<Hotkey>)> = FIELDS.iter().filter(|f| f.kind == Kind::CaptureKey).map(|f| (f.label, config::parse_hotkey(&read(c, f)).ok())).collect();
+    for (i, (label, hk)) in custom.iter().enumerate() {
+        let Some(hk) = hk else { continue };
+        if let Some(b) = builtin.iter().find(|b| config::parse_hotkey(b).ok().as_ref() == Some(hk)) {
+            out.push(format!("«{label}»: {b} уже занят в режиме выделения"));
+        }
+        if hk.mods == 0 {
+            out.push(format!("«{label}»: нужна клавиша с модификатором (одиночные — инструменты)"));
+        }
+        for (other, h2) in &custom[i + 1..] {
+            if h2.as_ref() == Some(hk) {
+                out.push(format!("«{label}» и «{other}» — одно и то же сочетание"));
+            }
+        }
+    }
+    out
 }

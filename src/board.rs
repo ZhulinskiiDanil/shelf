@@ -296,7 +296,7 @@ impl Board {
         let px: Vec<u8> = [(self.bg & 0xFF) as u8, (self.bg >> 8 & 0xFF) as u8, (self.bg >> 16 & 0xFF) as u8, 255].repeat((w * h) as usize);
         let factory: ID2D1Factory = unsafe { D2D1CreateFactory(D2D1_FACTORY_TYPE_SINGLE_THREADED, None).ok()? };
         let res = annot::Res::new(&factory);
-        match crate::overlay::wic_render(&factory, &res, &px, w, h, &self.doc.shapes, (l, t)) {
+        match crate::overlay::wic_render(&factory, &res, &px, w, h, &self.doc.shapes, (l, t), 1.0) {
             Ok(bgra) => Some(crate::clipboard::Image { w: w as u32, h: h as u32, bgra }),
             Err(e) => {
                 log::error!("board export failed: {e}");

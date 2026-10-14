@@ -17,6 +17,37 @@ pub struct Config {
     pub record: Record,
     pub clipboard_chip: ClipboardChip,
     pub text_history: TextHistory,
+    pub scroll_capture: ScrollCapture,
+}
+
+/// M14: scrolling (long) screenshots.
+#[derive(Debug, Clone, Deserialize, PartialEq)]
+#[serde(default)]
+pub struct ScrollCapture {
+    /// Key in capture mode that starts a scrolling capture of the selection.
+    pub key: String,
+    /// "auto" (Shelf scrolls with the wheel) or "manual" (you scroll, Enter finishes).
+    pub mode: String,
+    /// Wheel notches per step in auto mode.
+    pub step: u32,
+    /// Wait after each scroll before grabbing, ms.
+    pub settle_ms: u64,
+    pub max_height: u32,
+    /// Scroll the window back to where it was afterwards (auto mode).
+    pub restore_scroll: bool,
+}
+
+impl Default for ScrollCapture {
+    fn default() -> Self {
+        Self { key: "Ctrl+L".into(), mode: "auto".into(), step: 3, settle_ms: 150, max_height: 30000, restore_scroll: true }
+    }
+}
+
+/// True if `spec` (e.g. "Ctrl+L") is the key `vk` pressed with exactly these modifiers.
+pub fn hotkey_is(spec: &str, vk: u32, ctrl: bool, shift: bool, alt: bool) -> bool {
+    parse_hotkey(spec).is_ok_and(|h| {
+        h.vk == vk && (h.mods & MOD_CONTROL != 0) == ctrl && (h.mods & MOD_SHIFT != 0) == shift && (h.mods & MOD_ALT != 0) == alt
+    })
 }
 
 /// M13: history of copied text (encrypted with DPAPI) and the picker.
@@ -301,7 +332,7 @@ pub struct Hotkeys {
 
 impl Default for Config {
     fn default() -> Self {
-        Self { log_level: "info".into(), autostart: false, hotkeys: Hotkeys::default(), capture: Capture::default(), save: Save::default(), tools: Tools::default(), history: History::default(), ink: Ink::default(), board: Board::default(), dictation: Dictation::default(), record: Record::default(), clipboard_chip: ClipboardChip::default(), text_history: TextHistory::default() }
+        Self { log_level: "info".into(), autostart: false, hotkeys: Hotkeys::default(), capture: Capture::default(), save: Save::default(), tools: Tools::default(), history: History::default(), ink: Ink::default(), board: Board::default(), dictation: Dictation::default(), record: Record::default(), clipboard_chip: ClipboardChip::default(), text_history: TextHistory::default(), scroll_capture: ScrollCapture::default() }
     }
 }
 
@@ -421,6 +452,18 @@ max_age_days = 30
 # Larger copies are not stored
 max_entry_kb = 64
 ignore_processes = ["KeePass.exe", "KeePassXC.exe", "1Password.exe", "Bitwarden.exe"]
+
+# Long screenshots: select an area after PrtScrn and press this key
+[scroll_capture]
+key = "Ctrl+L"
+# auto (Shelf scrolls) or manual (you scroll, Enter finishes)
+mode = "auto"
+# Wheel notches per step and wait after each step (ms)
+step = 3
+settle_ms = 150
+max_height = 30000
+# Scroll the window back afterwards (auto mode)
+restore_scroll = true
 "##;
 
 pub fn app_dir() -> PathBuf {
@@ -529,7 +572,7 @@ mod tests {
         assert_eq!(parse(DEFAULT_TOML).unwrap(), Config::default());
         // Every section must be spelled out, so users see all options in the generated file.
         let t: toml::Table = toml::from_str(DEFAULT_TOML).unwrap();
-        for s in ["hotkeys", "capture", "save", "tools", "history", "ink", "board", "dictation", "record", "clipboard_chip", "text_history"] {
+        for s in ["hotkeys", "capture", "save", "tools", "history", "ink", "board", "dictation", "record", "clipboard_chip", "text_history", "scroll_capture"] {
             assert!(t.contains_key(s), "DEFAULT_TOML lacks [{s}]");
         }
     }

@@ -24,7 +24,9 @@ mod overlay;
 mod record;
 mod settings;
 mod settings_model;
+mod scroll;
 mod shelf;
+mod stitch;
 mod texthist;
 mod textpick;
 

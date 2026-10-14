@@ -8,6 +8,7 @@ A fast, fully offline screenshot tool for Windows 10/11: a Lightshot replacement
 - **Board** — a translucent canvas for sketching; saved to the shelf.
 - **Dictation** — hold a key, speak, get text (local Whisper model).
 - **Recording** — any area to MP4.
+- **Long screenshots** — scroll and stitch any area (fixed headers and footers appear once).
 - **Clipboard chip** — whatever you copy anywhere (color, link, file, JSON, image, text, code) briefly shows next to the cursor; secrets are masked.
 - **Text history** — every copied text, searchable from a Win+V-style picker; pinned entries can be templates with `{fields}`. Stored encrypted (DPAPI).
 
@@ -57,6 +58,7 @@ All hotkeys are defaults and can be changed in Settings, which also reports conf
 | `Ctrl+D` | Attach the file to the cursor; click to drop (`Esc` cancels) |
 | `Ctrl+T` | Recognize text (OCR) and copy it |
 | `Ctrl+R` | Record the selected area to MP4 |
+| `Ctrl+L` | Scrolling (long) screenshot of the selection; `Enter`/`Esc` stops early (`scroll_capture.key`) |
 | `Esc`, right click | Cancel |
 | `P` `L` `A` `R` `E` `M` `T` `B` `N` | Pen, line, arrow, rectangle, ellipse, marker, text, pixelate, numbered marker (`[tools]`) |
 | `1`–`8` · `[` `]`, mouse wheel | Color · stroke width |

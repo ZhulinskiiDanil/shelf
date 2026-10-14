@@ -49,6 +49,7 @@ pub enum Finish {
     Drag,
     Ocr,
     Record,
+    Scroll,
 }
 
 struct Gfx {
@@ -85,6 +86,8 @@ pub struct Overlay {
     pending: Option<annot::Shape>,
     /// Pixelated patches for on-screen preview of blur shapes.
     blur_bmps: Vec<(Rect, ID2D1Bitmap)>,
+    /// M14 image mode: a large image (e.g. a scrolling capture) shown as a scaled preview.
+    full: Option<FullImage>,
 }
 
 thread_local! {
@@ -154,6 +157,7 @@ pub fn init(owner: HWND, magnifier: bool) {
             width: 3.0,
             pending: None,
             blur_bmps: Vec::new(),
+            full: None,
         };
         // Warm up: device, brushes and the screen buffer are allocated now, not on first PrtScrn.
         ov.ensure_gfx();
@@ -243,6 +247,7 @@ impl Overlay {
         if self.visible {
             return;
         }
+        self.full = None;
         // The grab (GDI readback, the slowest step) runs in parallel with showing the
         // still-cloaked window and taking focus. The cloaked window is not in the capture.
         struct SendFrame(Option<Frame>);
@@ -795,11 +800,15 @@ impl Overlay {
     }
 
     /// Selection pixels with markup burned in. Without markup this is a plain crop (the M1 path).
-    fn render_output(&self, target: &Rect) -> Option<Vec<u8>> {
+    fn render_output(&self, target: &Rect) -> Option<(u32, u32, Vec<u8>)> {
+        if let Some(full) = &self.full {
+            return self.render_output_full(full, target);
+        }
+        let dims = (target.w() as u32, target.h() as u32);
         let f = self.frame.as_ref()?;
         let mut px = f.crop(target);
         if self.doc.shapes.is_empty() {
-            return Some(px);
+            return Some((dims.0, dims.1, px));
         }
         let (w, h) = (target.w(), target.h());
         for s in &self.doc.shapes {
@@ -821,13 +830,13 @@ impl Overlay {
             }
         }
         if self.doc.shapes.iter().all(|s| matches!(s.kind, Kind::Blur(_))) {
-            return Some(px);
+            return Some((dims.0, dims.1, px));
         }
-        match wic_render(&self.factory, &self.res, &px, w, h, &self.doc.shapes, (target.l as f32, target.t as f32)) {
-            Ok(out) => Some(out),
+        match wic_render(&self.factory, &self.res, &px, w, h, &self.doc.shapes, (target.l as f32, target.t as f32), 1.0) {
+            Ok(out) => Some((dims.0, dims.1, out)),
             Err(e) => {
                 log::error!("markup render failed: {e}");
-                Some(px)
+                Some((dims.0, dims.1, px))
             }
         }
     }
@@ -876,15 +885,15 @@ impl Overlay {
             return None;
         }
         self.commit_text();
-        let bgra = self.render_output(&target)?;
-        let img = Arc::new(Image { w: target.w() as u32, h: target.h() as u32, bgra });
+        let (w, h, bgra) = self.render_output(&target)?;
+        let img = Arc::new(Image { w, h, bgra });
         let t_crop = t0.elapsed();
         self.hide();
         let t_hide = t0.elapsed();
         let owner = self.owner;
         match action {
             Finish::Copy => {
-                let ok = clipboard::set_image(owner, img.clone());
+                let ok = if clipboard::is_huge(&img) { clipboard::set_png_only(owner, &img) } else { clipboard::set_image(owner, img.clone()) };
                 log::info!(
                     "metric: ctrl+c->clipboard {:.1} ms (crop {:.1}, hide {:.1}; {}x{}, ok={ok})",
                     t0.elapsed().as_secs_f64() * 1000.0,
@@ -922,6 +931,7 @@ impl Overlay {
                 }
                 history::add_async(img, "capture");
             })),
+            Finish::Scroll => Some(Box::new(move || crate::scroll::start(target))),
             Finish::Record => {
                 // The area, not the pixels: recording grabs live frames.
                 let cfg = config::current().record;
@@ -1027,6 +1037,12 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) 
                     }
                     return LRESULT(0);
                 }
+                let alt = key_down(VK_MENU);
+                let cfg = config::current();
+                if config::hotkey_is(&cfg.scroll_capture.key, vk.0 as u32, ctrl, shift, alt) && with(|o| o.full.is_none()).unwrap_or(false) {
+                    finish(Finish::Scroll, t0);
+                    return LRESULT(0);
+                }
                 if with(|o| o.markup_key(vk, ctrl)).unwrap_or(false) {
                     return LRESULT(0);
                 }
@@ -1118,7 +1134,9 @@ fn save_dialog(owner: HWND) -> Option<std::path::PathBuf> {
 
 /// Renders `px` (top-down BGRA, w×h) plus vector markup into a new buffer, using a WIC
 /// render target so the output matches the on-screen drawing.
-pub(crate) fn wic_render(factory: &ID2D1Factory, res: &annot::Res, px: &[u8], w: i32, h: i32, shapes: &[Shape], origin: (f32, f32)) -> Result<Vec<u8>> {
+/// `scale` maps markup coordinates (relative to `origin`) to output pixels; 1.0 except
+/// for previews of larger images.
+pub(crate) fn wic_render(factory: &ID2D1Factory, res: &annot::Res, px: &[u8], w: i32, h: i32, shapes: &[Shape], origin: (f32, f32), scale: f32) -> Result<Vec<u8>> {
     use windows::Win32::Graphics::Imaging::*;
     use windows::Win32::System::Com::*;
     unsafe {
@@ -1139,10 +1157,143 @@ pub(crate) fn wic_render(factory: &ID2D1Factory, res: &annot::Res, px: &[u8], w:
         let src = rt.CreateBitmap(D2D_SIZE_U { width: w as u32, height: h as u32 }, Some(px.as_ptr() as _), w as u32 * 4, &bprops)?;
         rt.BeginDraw();
         rt.DrawBitmap(&src, None, 1.0, D2D1_BITMAP_INTERPOLATION_MODE_NEAREST_NEIGHBOR, None);
+        rt.SetTransform(&windows_numerics::Matrix3x2 { M11: scale, M12: 0.0, M21: 0.0, M22: scale, M31: 0.0, M32: 0.0 });
         annot::draw(&rt, res, shapes, origin);
         rt.EndDraw(None, None)?;
         let mut out = vec![0u8; (w * h * 4) as usize];
         bmp.CopyPixels(std::ptr::null(), w as u32 * 4, &mut out)?;
         Ok(out)
     }
+}
+
+// ! --- Image mode (M14) --- !
+
+pub struct FullImage {
+    img: Arc<Image>,
+    /// Where the scaled preview sits on screen (virtual-screen pixels).
+    rect: Rect,
+}
+
+/// Opens markup for a large image (scaled to fit the monitor under the cursor) with the
+/// usual finish actions working on the full-resolution image.
+pub fn show_image(img: Arc<Image>) {
+    with(|o| o.show_image(img));
+}
+
+fn crop_image(img: &Image, r: &Rect) -> Vec<u8> {
+    let mut out = Vec::with_capacity((r.w() * r.h() * 4) as usize);
+    for y in r.t..r.b {
+        let s = (y as usize * img.w as usize + r.l as usize) * 4;
+        out.extend_from_slice(&img.bgra[s..s + r.w() as usize * 4]);
+    }
+    out
+}
+
+impl Overlay {
+    fn show_image(&mut self, img: Arc<Image>) {
+        if self.visible || img.w == 0 || img.h == 0 {
+            return;
+        }
+        if !capture::grab(&mut self.frame) {
+            return;
+        }
+        let mut pt = POINT::default();
+        unsafe {
+            let _ = GetCursorPos(&mut pt);
+        }
+        self.monitors = capture::monitors();
+        self.windows.clear();
+        let f = self.frame.as_ref().unwrap();
+        let vs = f.bounds;
+        let mon = self.monitors.iter().map(|m| m.0).find(|r| r.contains(pt.x, pt.y)).unwrap_or(vs);
+        let s = geom::scale_at(&self.monitors, pt.x, pt.y);
+        let margin = (48.0 * s) as i32;
+        let preview = crate::imageio::thumbnail(&img, (mon.w() - 2 * margin).max(64) as u32, (mon.h() - 2 * margin).max(64) as u32);
+        let rect = Rect::new(mon.l + (mon.w() - preview.w as i32) / 2, mon.t + (mon.h() - preview.h as i32) / 2, 0, 0);
+        let rect = Rect::new(rect.l, rect.t, rect.l + preview.w as i32, rect.t + preview.h as i32);
+        // Synthetic frame: dark backdrop with the preview pasted in.
+        unsafe {
+            let px = std::slice::from_raw_parts_mut(f.pixels, f.stride() * vs.h() as usize);
+            for p in px.chunks_exact_mut(4) {
+                p.copy_from_slice(&[0x1A, 0x1A, 0x1A, 255]);
+            }
+            for y in 0..preview.h as usize {
+                let dst = (rect.t - vs.t) as usize * f.stride() + y * f.stride() + (rect.l - vs.l) as usize * 4;
+                let src = y * preview.w as usize * 4;
+                px[dst..dst + preview.w as usize * 4].copy_from_slice(&preview.bgra[src..src + preview.w as usize * 4]);
+            }
+        }
+        if vs != self.bounds {
+            self.bounds = vs;
+            unsafe {
+                let _ = SetWindowPos(self.hwnd, Some(HWND_TOPMOST), vs.l, vs.t, vs.w(), vs.h(), SWP_NOACTIVATE);
+            }
+            if let Some(g) = &self.gfx {
+                unsafe {
+                    let _ = g.rt.Resize(&D2D_SIZE_U { width: vs.w() as u32, height: vs.h() as u32 });
+                }
+            }
+        }
+        self.ensure_gfx();
+        self.upload();
+        self.full = Some(FullImage { img, rect });
+        self.mode = Mode::Selected;
+        self.sel = rect;
+        self.doc.clear();
+        self.tool = None;
+        self.pending = None;
+        self.blur_bmps.clear();
+        self.cursor = (pt.x, pt.y);
+        unsafe {
+            let _ = ShowWindow(self.hwnd, SW_SHOW);
+            let _ = SetWindowPos(self.hwnd, Some(HWND_TOPMOST), 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE);
+            force_foreground(self.hwnd);
+        }
+        self.render();
+        set_cloak(self.hwnd, false);
+        self.visible = true;
+    }
+
+    fn render_output_full(&self, full: &FullImage, target: &Rect) -> Option<(u32, u32, Vec<u8>)> {
+        let img = &full.img;
+        let sx = img.w as f32 / full.rect.w() as f32;
+        let sy = img.h as f32 / full.rect.h() as f32;
+        let bounds = Rect::new(0, 0, img.w as i32, img.h as i32);
+        let map = |r: &Rect| {
+            Rect::new(
+                ((r.l - full.rect.l) as f32 * sx).floor() as i32,
+                ((r.t - full.rect.t) as f32 * sy).floor() as i32,
+                ((r.r - full.rect.l) as f32 * sx).ceil() as i32,
+                ((r.b - full.rect.t) as f32 * sy).ceil() as i32,
+            )
+            .intersect(&bounds)
+        };
+        let t = map(target);
+        if t.is_empty() {
+            return None;
+        }
+        let mut px = crop_image(img, &t);
+        for s in &self.doc.shapes {
+            if let Kind::Blur(r) = &s.kind {
+                let br = map(r).intersect(&t);
+                if !br.is_empty() {
+                    annot::pixelate(&mut px, t.w() as usize * 4, (t.l, t.t), (t.w(), t.h()), &br, Self::block_size(&br));
+                }
+            }
+        }
+        let dims = (t.w() as u32, t.h() as u32);
+        if self.doc.shapes.iter().all(|s| matches!(s.kind, Kind::Blur(_))) {
+            return Some((dims.0, dims.1, px));
+        }
+        // Markup coordinates are preview pixels; map them onto the full image.
+        let origin = (full.rect.l as f32 + t.l as f32 / sx, full.rect.t as f32 + t.t as f32 / sy);
+        match wic_render(&self.factory, &self.res, &px, t.w(), t.h(), &self.doc.shapes, origin, sx) {
+            Ok(out) => Some((dims.0, dims.1, out)),
+            Err(e) => {
+                log::error!("markup render failed: {e}");
+                Some((dims.0, dims.1, px))
+            }
+        }
+    }
+
 }

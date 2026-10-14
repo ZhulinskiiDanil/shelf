@@ -61,6 +61,13 @@ unsafe extern "system" fn proc(code: i32, wp: WPARAM, lp: LPARAM) -> LRESULT {
             let k = &*(lp.0 as *const KBDLLHOOKSTRUCT);
             let m = wp.0 as u32;
             let down = m == WM_KEYDOWN || m == WM_SYSKEYDOWN;
+            // Scrolling capture: Enter/Esc finish it and must not reach the scrolled window.
+            if crate::scroll::ACTIVE.load(Ordering::Relaxed) && (k.vkCode == VK_RETURN.0 as u32 || k.vkCode == VK_ESCAPE.0 as u32) {
+                if down {
+                    crate::scroll::STOP.store(true, Ordering::Relaxed);
+                }
+                return LRESULT(1);
+            }
             if dict_key(k.vkCode, down) {
                 return LRESULT(1);
             }
