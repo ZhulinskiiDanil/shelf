@@ -9,6 +9,37 @@ pub struct Config {
     pub hotkeys: Hotkeys,
     pub capture: Capture,
     pub save: Save,
+    pub tools: Tools,
+}
+
+/// Single keys that pick markup tools in capture mode (no modifiers).
+#[derive(Debug, Clone, Deserialize, PartialEq)]
+#[serde(default)]
+pub struct Tools {
+    pub pen: String,
+    pub line: String,
+    pub arrow: String,
+    pub rect: String,
+    pub ellipse: String,
+    pub marker: String,
+    pub text: String,
+    pub blur: String,
+    pub number: String,
+}
+
+impl Default for Tools {
+    fn default() -> Self {
+        let s = |k: &str| k.to_string();
+        Self { pen: s("P"), line: s("L"), arrow: s("A"), rect: s("R"), ellipse: s("E"), marker: s("M"), text: s("T"), blur: s("B"), number: s("N") }
+    }
+}
+
+impl Tools {
+    /// Virtual-key codes in `annot::TOOLS` order; 0 for unparsable entries.
+    pub fn tool_keys(&self) -> [u32; 9] {
+        [&self.pen, &self.line, &self.arrow, &self.rect, &self.ellipse, &self.marker, &self.text, &self.blur, &self.number]
+            .map(|k| parse_hotkey(k).ok().filter(|h| h.mods == 0).map(|h| h.vk).unwrap_or(0))
+    }
 }
 
 #[derive(Debug, Clone, Deserialize, PartialEq)]
@@ -67,7 +98,7 @@ pub struct Hotkeys {
 
 impl Default for Config {
     fn default() -> Self {
-        Self { log_level: "info".into(), autostart: false, hotkeys: Hotkeys::default(), capture: Capture::default(), save: Save::default() }
+        Self { log_level: "info".into(), autostart: false, hotkeys: Hotkeys::default(), capture: Capture::default(), save: Save::default(), tools: Tools::default() }
     }
 }
 

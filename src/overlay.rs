@@ -5,6 +5,7 @@
 use crate::capture::{self, Frame};
 use crate::clipboard::{self, Image};
 use crate::geom::{self, Grip, Rect};
+use crate::annot::{self, Kind, Shape, Tool};
 use crate::{config, history};
 use std::cell::RefCell;
 use std::sync::Arc;
@@ -36,6 +37,8 @@ enum Mode {
     Drawing { anchor: (i32, i32) },
     Selected,
     Grabbing { grip: Grip, orig: Rect, at: (i32, i32) },
+    /// Drawing a markup shape with the mouse.
+    Annotating,
 }
 
 pub enum Finish {
@@ -70,6 +73,16 @@ pub struct Overlay {
     cursor: (i32, i32),
     visible: bool,
     pub magnifier: bool,
+    // Markup
+    res: annot::Res,
+    doc: annot::Doc,
+    tool: Option<annot::Tool>,
+    color: u32,
+    width: f32,
+    /// Shape being drawn with the mouse, or text being typed.
+    pending: Option<annot::Shape>,
+    /// Pixelated patches for on-screen preview of blur shapes.
+    blur_bmps: Vec<(Rect, ID2D1Bitmap)>,
 }
 
 thread_local! {
@@ -121,7 +134,7 @@ pub fn init(owner: HWND, magnifier: bool) {
         let mut ov = Overlay {
             hwnd,
             owner,
-            factory,
+            factory: factory.clone(),
             gfx: None,
             frame: None,
             bounds: vs,
@@ -132,6 +145,13 @@ pub fn init(owner: HWND, magnifier: bool) {
             cursor: (0, 0),
             visible: false,
             magnifier,
+            res: annot::Res::new(&factory),
+            doc: annot::Doc::default(),
+            tool: None,
+            color: annot::PALETTE[0],
+            width: 3.0,
+            pending: None,
+            blur_bmps: Vec::new(),
         };
         // Warm up: device, brushes and the screen buffer are allocated now, not on first PrtScrn.
         ov.ensure_gfx();
@@ -272,6 +292,10 @@ impl Overlay {
         let t_up = t0.elapsed();
         self.mode = Mode::Hover;
         self.sel = Rect::default();
+        self.doc.clear();
+        self.tool = None;
+        self.pending = None;
+        self.blur_bmps.clear();
         let mut pt = POINT::default();
         unsafe {
             let _ = GetCursorPos(&mut pt);
@@ -351,20 +375,96 @@ impl Overlay {
             if !target.is_empty() {
                 let t = local(&target);
                 g.rt.DrawBitmap(bmp, Some(&t), 1.0, D2D1_BITMAP_INTERPOLATION_MODE_NEAREST_NEIGHBOR, Some(&t));
+                self.draw_markup(g, &t);
                 let bw = (scale).max(1.0).round();
                 let border = D2D_RECT_F { left: t.left - bw / 2.0, top: t.top - bw / 2.0, right: t.right + bw / 2.0, bottom: t.bottom + bw / 2.0 };
                 g.rt.DrawRectangle(&border, &g.accent, bw, None);
-                if matches!(self.mode, Mode::Selected | Mode::Grabbing { .. }) {
+                if matches!(self.mode, Mode::Selected | Mode::Grabbing { .. } | Mode::Annotating) {
                     self.draw_handles(g, &t, scale);
                 }
                 self.draw_size_label(g, &target, scale);
+                if matches!(self.mode, Mode::Selected | Mode::Grabbing { .. } | Mode::Annotating) {
+                    self.draw_toolbar(g, scale);
+                }
             }
-            if self.magnifier && !matches!(self.mode, Mode::Selected | Mode::Grabbing { grip: Grip::Move, .. }) {
+            if self.magnifier && !matches!(self.mode, Mode::Selected | Mode::Annotating | Mode::Grabbing { grip: Grip::Move, .. }) {
                 self.draw_magnifier(g, bmp, scale);
             }
             if g.rt.EndDraw(None, None).is_err() {
                 // Device lost: rebuild on next show.
                 self.gfx = None;
+            }
+        }
+    }
+
+    fn draw_markup(&self, g: &Gfx, clip: &D2D_RECT_F) {
+        if self.doc.shapes.is_empty() && self.pending.is_none() {
+            return;
+        }
+        let o = (self.bounds.l as f32, self.bounds.t as f32);
+        unsafe {
+            g.rt.PushAxisAlignedClip(clip, D2D1_ANTIALIAS_MODE_ALIASED);
+            for s in &self.doc.shapes {
+                if let Kind::Blur(r) = &s.kind {
+                    if let Some((_, b)) = self.blur_bmps.iter().find(|(br, _)| br == r) {
+                        let d = rf(&r.offset(-self.bounds.l, -self.bounds.t));
+                        g.rt.DrawBitmap(b, Some(&d), 1.0, D2D1_BITMAP_INTERPOLATION_MODE_NEAREST_NEIGHBOR, None);
+                    }
+                }
+            }
+            annot::draw(&g.rt, &self.res, &self.doc.shapes, o);
+            if let Some(p) = &self.pending {
+                if let Kind::Blur(r) = &p.kind {
+                    g.rt.FillRectangle(&rf(&r.offset(-self.bounds.l, -self.bounds.t)), &g.black);
+                } else {
+                    annot::draw(&g.rt, &self.res, std::slice::from_ref(p), o);
+                    if let Kind::Text(pos, _) = &p.kind {
+                        // Caret hint: a thin box where typing goes.
+                        let h = annot::font_size(p.width) * 1.3;
+                        let r = D2D_RECT_F { left: pos.0 - o.0 - 2.0, top: pos.1 - o.1, right: pos.0 - o.0 - 1.0, bottom: pos.1 - o.1 + h };
+                        g.rt.FillRectangle(&r, &g.white);
+                    }
+                }
+            }
+            g.rt.PopAxisAlignedClip();
+        }
+    }
+
+    fn toolbar(&self) -> Vec<Rect> {
+        let c = ((self.sel.l + self.sel.r) / 2, (self.sel.t + self.sel.b) / 2);
+        let mon = self.monitor_at(c.0, c.1);
+        annot::toolbar_layout(&self.sel, &mon, geom::scale_at(&self.monitors, c.0, c.1))
+    }
+
+    fn draw_toolbar(&self, g: &Gfx, scale: f32) {
+        let fmt = self.res.text_format(15.0 * scale);
+        unsafe {
+            if let Some(f) = &fmt {
+                let _ = f.SetTextAlignment(DWRITE_TEXT_ALIGNMENT_CENTER);
+                let _ = f.SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
+            }
+            for (i, r) in self.toolbar().iter().enumerate() {
+                let d = rf(&r.offset(-self.bounds.l, -self.bounds.t));
+                g.rt.FillRectangle(&d, &g.black);
+                if let Some(&tool) = annot::TOOLS.get(i) {
+                    if let Some(f) = &fmt {
+                        let t: Vec<u16> = tool.glyph().encode_utf16().collect();
+                        g.rt.DrawText(&t, f, &d, &g.white, D2D1_DRAW_TEXT_OPTIONS_NONE, DWRITE_MEASURING_MODE_NATURAL);
+                    }
+                    if self.tool == Some(tool) {
+                        g.rt.DrawRectangle(&d, &g.accent, 2.0 * scale, None);
+                    }
+                } else {
+                    let c = annot::PALETTE[i - annot::TOOLS.len()];
+                    let inset = 6.0 * scale;
+                    let sw = D2D_RECT_F { left: d.left + inset, top: d.top + inset, right: d.right - inset, bottom: d.bottom - inset };
+                    if let Ok(b) = g.rt.CreateSolidColorBrush(&annot::rgba(c, 1.0), None) {
+                        g.rt.FillRectangle(&sw, &b);
+                    }
+                    if c == self.color {
+                        g.rt.DrawRectangle(&d, &g.white, 2.0 * scale, None);
+                    }
+                }
             }
         }
     }
@@ -463,6 +563,7 @@ impl Overlay {
             }
             Mode::Drawing { anchor } => self.sel = Rect::from_points(anchor, (x + 1, y + 1)).intersect(&self.bounds),
             Mode::Grabbing { grip, orig, at } => self.sel = geom::apply_grip(&orig, grip, x - at.0, y - at.1, &self.bounds),
+            Mode::Annotating => self.extend_pending(x, y),
             _ => {}
         }
         self.redraw();
@@ -471,7 +572,22 @@ impl Overlay {
     fn on_lbutton_down(&mut self, x: i32, y: i32) {
         self.cursor = (x, y);
         if self.mode == Mode::Selected {
-            if let Some(grip) = geom::hit_test(&self.sel, x, y, self.grip_tol()) {
+            if let Some(i) = self.toolbar().iter().position(|r| r.contains(x, y)) {
+                self.commit_text();
+                match annot::TOOLS.get(i) {
+                    Some(&t) => self.tool = if self.tool == Some(t) { None } else { Some(t) },
+                    None => self.color = annot::PALETTE[i - annot::TOOLS.len()],
+                }
+                self.redraw();
+                return;
+            }
+            let grip = geom::hit_test(&self.sel, x, y, self.grip_tol());
+            if let (Some(tool), Some(Grip::Move)) = (self.tool, grip) {
+                self.start_shape(tool, x, y);
+                return;
+            }
+            self.commit_text();
+            if let Some(grip) = grip {
                 self.mode = Mode::Grabbing { grip, orig: self.sel, at: (x, y) };
                 return;
             }
@@ -490,9 +606,227 @@ impl Overlay {
             Mode::Drawing { .. } | Mode::Grabbing { .. } => {
                 self.mode = if self.sel.is_empty() { Mode::Hover } else { Mode::Selected };
             }
+            Mode::Annotating => {
+                self.mode = Mode::Selected;
+                if let Some(s) = self.pending.take() {
+                    self.commit_shape(s);
+                }
+            }
             _ => {}
         }
         self.redraw();
+    }
+
+    // ! --- Markup --- !
+
+    fn start_shape(&mut self, tool: Tool, x: i32, y: i32) {
+        let p = (x as f32 + 0.5, y as f32 + 0.5);
+        let kind = match tool {
+            Tool::Pen => Kind::Pen(vec![p]),
+            Tool::Marker => Kind::Marker(vec![p]),
+            Tool::Line => Kind::Line(p, p),
+            Tool::Arrow => Kind::Arrow(p, p),
+            Tool::Rect => Kind::Rect(Rect::new(x, y, x, y)),
+            Tool::Ellipse => Kind::Ellipse(Rect::new(x, y, x, y)),
+            Tool::Blur => Kind::Blur(Rect::new(x, y, x, y)),
+            Tool::Number => {
+                let n = self.doc.next_number();
+                self.doc.push(Shape { kind: Kind::Number(p, n), color: self.color, width: self.width });
+                self.redraw();
+                return;
+            }
+            Tool::Text => {
+                self.commit_text();
+                self.pending = Some(Shape { kind: Kind::Text(p, String::new()), color: self.color, width: self.width });
+                self.redraw();
+                return;
+            }
+        };
+        self.commit_text();
+        self.pending = Some(Shape { kind, color: self.color, width: self.width });
+        self.mode = Mode::Annotating;
+        unsafe {
+            SetCapture(self.hwnd);
+        }
+        self.redraw();
+    }
+
+    fn extend_pending(&mut self, x: i32, y: i32) {
+        let Some(s) = self.pending.as_mut() else { return };
+        let p = (x as f32 + 0.5, y as f32 + 0.5);
+        let shift = key_down(VK_SHIFT);
+        let is_blur = matches!(s.kind, Kind::Blur(_));
+        match &mut s.kind {
+            Kind::Pen(pts) | Kind::Marker(pts) => pts.push(p),
+            Kind::Line(a, b) | Kind::Arrow(a, b) => {
+                *b = p;
+                if shift {
+                    // Snap to 45° steps.
+                    let (dx, dy) = (p.0 - a.0, p.1 - a.1);
+                    let ang = (dy.atan2(dx) / std::f32::consts::FRAC_PI_4).round() * std::f32::consts::FRAC_PI_4;
+                    let len = (dx * dx + dy * dy).sqrt();
+                    *b = (a.0 + len * ang.cos(), a.1 + len * ang.sin());
+                }
+            }
+            Kind::Rect(r) | Kind::Ellipse(r) | Kind::Blur(r) => {
+                // While dragging, l/t hold the start corner; normalised on commit.
+                r.r = x;
+                r.b = y;
+                if shift && !is_blur {
+                    let d = (r.r - r.l).abs().max((r.b - r.t).abs());
+                    r.r = r.l + d * (r.r - r.l).signum();
+                    r.b = r.t + d * (r.b - r.t).signum();
+                }
+            }
+            _ => {}
+        }
+    }
+
+    fn commit_shape(&mut self, mut s: Shape) {
+        match &mut s.kind {
+            Kind::Rect(r) | Kind::Ellipse(r) | Kind::Blur(r) => {
+                *r = Rect::from_points((r.l, r.t), (r.r, r.b));
+                if r.is_empty() {
+                    return;
+                }
+            }
+            Kind::Text(_, t) if t.is_empty() => return,
+            _ => {}
+        }
+        if let Kind::Blur(r) = &s.kind {
+            self.make_blur_bitmap(*r);
+        }
+        self.doc.push(s);
+    }
+
+    fn commit_text(&mut self) {
+        if matches!(self.pending.as_ref().map(|s| &s.kind), Some(Kind::Text(..))) {
+            let s = self.pending.take().unwrap();
+            self.commit_shape(s);
+            self.redraw();
+        }
+    }
+
+    fn is_typing(&self) -> bool {
+        matches!(self.pending.as_ref().map(|s| &s.kind), Some(Kind::Text(..)))
+    }
+
+    fn type_char(&mut self, c: char) {
+        if let Some(Shape { kind: Kind::Text(_, t), .. }) = self.pending.as_mut() {
+            match c {
+                '\u{8}' => {
+                    t.pop();
+                }
+                '\r' => t.push('\n'),
+                c if !c.is_control() => t.push(c),
+                _ => {}
+            }
+            self.redraw();
+        }
+    }
+
+    fn block_size(r: &Rect) -> i32 {
+        (r.w().min(r.h()) / 6).clamp(6, 16)
+    }
+
+    fn make_blur_bitmap(&mut self, r: Rect) {
+        let (Some(f), Some(g)) = (self.frame.as_ref(), self.gfx.as_ref()) else { return };
+        let r = r.intersect(&f.bounds);
+        if r.is_empty() {
+            return;
+        }
+        let mut patch = f.crop(&r);
+        annot::pixelate(&mut patch, r.w() as usize * 4, (r.l, r.t), (r.w(), r.h()), &r, Self::block_size(&r));
+        let props = D2D1_BITMAP_PROPERTIES {
+            pixelFormat: D2D1_PIXEL_FORMAT { format: DXGI_FORMAT_B8G8R8A8_UNORM, alphaMode: D2D1_ALPHA_MODE_IGNORE },
+            dpiX: 96.0,
+            dpiY: 96.0,
+        };
+        unsafe {
+            let size = D2D_SIZE_U { width: r.w() as u32, height: r.h() as u32 };
+            if let Ok(b) = g.rt.CreateBitmap(size, Some(patch.as_ptr() as _), r.w() as u32 * 4, &props) {
+                self.blur_bmps.push((r, b));
+            }
+        }
+    }
+
+    fn set_width(&mut self, delta: f32) {
+        self.width = (self.width + delta).clamp(1.0, 40.0);
+        self.redraw();
+    }
+
+    /// Returns true if the key was used by markup.
+    fn markup_key(&mut self, vk: VIRTUAL_KEY, ctrl: bool) -> bool {
+        if ctrl {
+            let done = match vk {
+                VK_Z => {
+                    self.commit_text();
+                    self.doc.undo()
+                }
+                VK_Y => self.doc.redo(),
+                _ => return false,
+            };
+            if done {
+                self.redraw();
+            }
+            return true;
+        }
+        if self.mode != Mode::Selected || self.is_typing() {
+            return false;
+        }
+        let keys = &config::current().tools;
+        if let Some(i) = keys.tool_keys().iter().position(|&k| k == vk.0 as u32) {
+            let t = annot::TOOLS[i];
+            self.tool = if self.tool == Some(t) { None } else { Some(t) };
+        } else if (0x31..=0x38).contains(&vk.0) {
+            self.color = annot::PALETTE[(vk.0 - 0x31) as usize];
+        } else if vk == VK_OEM_4 || vk == VK_OEM_MINUS || vk == VK_SUBTRACT {
+            self.set_width(-1.0);
+        } else if vk == VK_OEM_6 || vk == VK_OEM_PLUS || vk == VK_ADD {
+            self.set_width(1.0);
+        } else {
+            return false;
+        }
+        self.redraw();
+        true
+    }
+
+    /// Selection pixels with markup burned in. Without markup this is a plain crop (the M1 path).
+    fn render_output(&self, target: &Rect) -> Option<Vec<u8>> {
+        let f = self.frame.as_ref()?;
+        let mut px = f.crop(target);
+        if self.doc.shapes.is_empty() {
+            return Some(px);
+        }
+        let (w, h) = (target.w(), target.h());
+        for s in &self.doc.shapes {
+            if let Kind::Blur(full) = &s.kind {
+                // Same blocks as the preview: pixelate the whole patch, then copy the visible part.
+                let r = full.intersect(target);
+                if r.is_empty() {
+                    continue;
+                }
+                let mut patch = f.crop(full);
+                let fr = full.intersect(&f.bounds);
+                annot::pixelate(&mut patch, fr.w() as usize * 4, (fr.l, fr.t), (fr.w(), fr.h()), &fr, Self::block_size(&fr));
+                for y in r.t..r.b {
+                    let src = (y - fr.t) as usize * fr.w() as usize * 4 + (r.l - fr.l) as usize * 4;
+                    let dst = (y - target.t) as usize * w as usize * 4 + (r.l - target.l) as usize * 4;
+                    let n = r.w() as usize * 4;
+                    px[dst..dst + n].copy_from_slice(&patch[src..src + n]);
+                }
+            }
+        }
+        if self.doc.shapes.iter().all(|s| matches!(s.kind, Kind::Blur(_))) {
+            return Some(px);
+        }
+        match wic_render(&self.factory, &self.res, &px, w, h, &self.doc.shapes, (target.l as f32, target.t as f32)) {
+            Ok(out) => Some(out),
+            Err(e) => {
+                log::error!("markup render failed: {e}");
+                Some(px)
+            }
+        }
     }
 
     fn nudge(&mut self, dx: i32, dy: i32) {
@@ -538,8 +872,9 @@ impl Overlay {
         if target.is_empty() {
             return None;
         }
-        let f = self.frame.as_ref()?;
-        let img = Arc::new(Image { w: target.w() as u32, h: target.h() as u32, bgra: f.crop(&target) });
+        self.commit_text();
+        let bgra = self.render_output(&target)?;
+        let img = Arc::new(Image { w: target.w() as u32, h: target.h() as u32, bgra });
         self.hide();
         let owner = self.owner;
         match action {
@@ -656,6 +991,17 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) 
                 let ctrl = key_down(VK_CONTROL);
                 let shift = key_down(VK_SHIFT);
                 let step = if shift { 10 } else { 1 };
+                let typing = with(|o| o.is_typing()).unwrap_or(false);
+                if typing && !ctrl {
+                    // Text tool: Esc and Enter finish the text; the rest arrives as WM_CHAR.
+                    if vk == VK_ESCAPE || (vk == VK_RETURN && !shift) {
+                        with(|o| o.commit_text());
+                    }
+                    return LRESULT(0);
+                }
+                if with(|o| o.markup_key(vk, ctrl)).unwrap_or(false) {
+                    return LRESULT(0);
+                }
                 match vk {
                     VK_ESCAPE => {
                         with(|o| o.hide());
@@ -677,6 +1023,20 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) 
                     VK_D if ctrl => finish(Finish::Drag, t0),
                     _ => {}
                 }
+                LRESULT(0)
+            }
+            WM_CHAR => {
+                if let Some(c) = char::from_u32(wp.0 as u32) {
+                    // Enter without Shift is handled in WM_KEYDOWN as "finish text".
+                    if !(c == '\r' && !key_down(VK_SHIFT)) {
+                        with(|o| o.type_char(c));
+                    }
+                }
+                LRESULT(0)
+            }
+            WM_MOUSEWHEEL => {
+                let delta = (wp.0 >> 16) as u16 as i16;
+                with(|o| o.set_width(if delta > 0 { 1.0 } else { -1.0 }));
                 LRESULT(0)
             }
             WM_KILLFOCUS => LRESULT(0),
@@ -724,4 +1084,35 @@ fn save_dialog(owner: HWND) -> Option<std::path::PathBuf> {
     }
     let len = buf.iter().position(|&c| c == 0).unwrap_or(buf.len());
     Some(std::path::PathBuf::from(String::from_utf16_lossy(&buf[..len])))
+}
+
+/// Renders `px` (top-down BGRA, w×h) plus vector markup into a new buffer, using a WIC
+/// render target so the output matches the on-screen drawing.
+fn wic_render(factory: &ID2D1Factory, res: &annot::Res, px: &[u8], w: i32, h: i32, shapes: &[Shape], origin: (f32, f32)) -> Result<Vec<u8>> {
+    use windows::Win32::Graphics::Imaging::*;
+    use windows::Win32::System::Com::*;
+    unsafe {
+        let wic: IWICImagingFactory = CoCreateInstance(&CLSID_WICImagingFactory, None, CLSCTX_INPROC_SERVER)?;
+        let bmp = wic.CreateBitmap(w as u32, h as u32, &GUID_WICPixelFormat32bppPBGRA, WICBitmapCacheOnLoad)?;
+        let props = D2D1_RENDER_TARGET_PROPERTIES {
+            pixelFormat: D2D1_PIXEL_FORMAT { format: DXGI_FORMAT_B8G8R8A8_UNORM, alphaMode: D2D1_ALPHA_MODE_PREMULTIPLIED },
+            dpiX: 96.0,
+            dpiY: 96.0,
+            ..Default::default()
+        };
+        let rt = factory.CreateWicBitmapRenderTarget(&bmp, &props)?;
+        let bprops = D2D1_BITMAP_PROPERTIES {
+            pixelFormat: D2D1_PIXEL_FORMAT { format: DXGI_FORMAT_B8G8R8A8_UNORM, alphaMode: D2D1_ALPHA_MODE_IGNORE },
+            dpiX: 96.0,
+            dpiY: 96.0,
+        };
+        let src = rt.CreateBitmap(D2D_SIZE_U { width: w as u32, height: h as u32 }, Some(px.as_ptr() as _), w as u32 * 4, &bprops)?;
+        rt.BeginDraw();
+        rt.DrawBitmap(&src, None, 1.0, D2D1_BITMAP_INTERPOLATION_MODE_NEAREST_NEIGHBOR, None);
+        annot::draw(&rt, res, shapes, origin);
+        rt.EndDraw(None, None)?;
+        let mut out = vec![0u8; (w * h * 4) as usize];
+        bmp.CopyPixels(std::ptr::null(), w as u32 * 4, &mut out)?;
+        Ok(out)
+    }
 }

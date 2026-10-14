@@ -1,35 +1,42 @@
 # Shelf
 
-Быстрый офлайн-скриншотер для Windows 10/11: замена Lightshot, полка снимков и рисование поверх экрана. Никакой сети, аккаунтов и телеметрии.
+A fast, fully offline screenshot tool for Windows 10/11: a Lightshot replacement with a capture shelf and on-screen drawing. No network access, no accounts, no telemetry.
 
-## Как запустить
+## Install
 
-Установка не нужна. Скачайте `shelf-mN.exe` из [Releases](https://github.com/ZhulinskiiDanil/shelf/releases) (самый большой N — самая свежая версия) и запустите. Окна нет: программа живёт в трее (иконка может быть под стрелкой «^» у часов). Если SmartScreen предупредит о неизвестном издателе: «Подробнее» → «Выполнить в любом случае».
+Shelf is a single portable executable. Download the latest `shelf-mN.exe` from [Releases](https://github.com/ZhulinskiiDanil/shelf/releases) and run it; it lives in the system tray. Starting a newer build replaces the running one.
 
-Новая версия при запуске сама закрывает старую. Выход — ПКМ по иконке → «Выход».
+- Config: `%APPDATA%\Shelf\config.toml` (tray → Settings), applied on save.
+- Log with timing metrics: `%APPDATA%\Shelf\logs\shelf.log`.
+- History: `%APPDATA%\Shelf\history\`.
 
-- Настройки: `%APPDATA%\Shelf\config.toml` (ПКМ по иконке → «Настройки»), применяются при сохранении.
-- Лог с замерами скорости: `%APPDATA%\Shelf\logs\shelf.log`.
-- Что проверять в каждой версии — в [CHANGELOG.md](CHANGELOG.md).
-
-## Сборка
+## Build
 
 ```
 cargo build --release
+cargo test
 ```
 
-## Хоткеи
+`tools/bench.ps1` compares capture-path latency between builds (it drives the mouse and keyboard).
 
-| Где | Клавиши | Действие |
+## Hotkeys
+
+| Context | Keys | Action |
 |---|---|---|
-| Глобально | `PrtScrn` | Захват экрана |
-| Захват | ЛКМ + тянуть | Выделить область |
-| Захват | Клик | Выделить окно под курсором |
-| Захват | Края / углы / внутри рамки | Изменить размер / переместить |
-| Захват | `←↑→↓` (`Shift` — ×10) | Сдвиг выделения на 1 px |
-| Захват | `Ctrl+C` | Копировать в буфер и закрыть |
-| Захват | `Ctrl+Shift+C` | Сохранить в историю и скопировать путь в кавычках |
-| Захват | `Ctrl+S` | Быстро сохранить в папку из конфига |
-| Захват | `Ctrl+Shift+S` | Сохранить через диалог |
-| Захват | `Ctrl+D` | Прицепить файл к курсору, клик — бросить (Esc — отмена) |
-| Захват | `Esc`, ПКМ | Отмена |
+| Global | `PrtScrn` | Capture screen |
+| Capture | Drag | Select area |
+| Capture | Click | Select window under cursor |
+| Capture | Drag edges / corners / inside | Resize / move selection |
+| Capture | `←↑→↓` (`Shift` ×10) | Nudge selection by 1 px |
+| Capture | `Ctrl+C` | Copy image and close |
+| Capture | `Ctrl+Shift+C` | Save to history, copy quoted path |
+| Capture | `Ctrl+S` | Quick save to configured folder |
+| Capture | `Ctrl+Shift+S` | Save as… |
+| Capture | `Ctrl+D` | Attach file to cursor, click to drop (`Esc` cancels) |
+| Capture | `Esc`, right click | Cancel |
+| Capture | `P` `L` `A` `R` `E` `M` `T` `B` `N` | Pen, line, arrow, rectangle, ellipse, marker, text, pixelate, numbered marker |
+| Capture | `1`–`8` | Color |
+| Capture | `[` `]`, mouse wheel | Stroke width |
+| Capture | `Shift` while drawing | Snap to 45° / square / circle |
+| Capture | `Ctrl+Z` / `Ctrl+Y` | Undo / redo markup |
+| Capture, text | `Enter` / `Esc` · `Shift+Enter` | Finish text · new line |
