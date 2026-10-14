@@ -1,7 +1,13 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+mod capture;
+mod clipboard;
 mod config;
+mod geom;
+mod hook;
+mod imageio;
 mod logger;
+mod overlay;
 
 use std::cell::RefCell;
 use std::path::Path;
@@ -20,13 +26,13 @@ const MAIN_CLASS: PCWSTR = w!("Shelf.Main");
 const WM_APP_TRAY: u32 = WM_APP + 1;
 const WM_APP_QUIT: u32 = WM_APP + 2;
 const WM_APP_RELOAD: u32 = WM_APP + 3;
+const WM_APP_CAPTURE: u32 = WM_APP + 4;
 
 const MENU_SETTINGS: usize = 1;
 const MENU_HISTORY: usize = 2;
 const MENU_EXIT: usize = 3;
 
 // Hotkey ids
-pub const HK_CAPTURE: i32 = 1;
 pub const HK_SHELF: i32 = 2;
 
 struct App {
@@ -90,6 +96,8 @@ fn main() {
         APP.with(|a| *a.borrow_mut() = Some(App { hwnd, config: cfg.clone(), taskbar_created }));
 
         add_tray_icon(hwnd);
+        hook::start(hwnd, WM_APP_CAPTURE);
+        overlay::init(hwnd, cfg.capture.magnifier);
         apply_config(&cfg, None);
         spawn_config_watcher(hwnd);
 
@@ -188,6 +196,7 @@ fn apply_config(cfg: &config::Config, old: Option<&config::Config>) {
     if old.map(|o| o.autostart) != Some(cfg.autostart) {
         set_autostart(cfg.autostart);
     }
+    overlay::set_magnifier(cfg.capture.magnifier);
     if old.map(|o| &o.hotkeys) != Some(&cfg.hotkeys) {
         register_hotkeys(cfg);
     }
@@ -195,7 +204,18 @@ fn apply_config(cfg: &config::Config, old: Option<&config::Config>) {
 
 fn register_hotkeys(cfg: &config::Config) {
     let hwnd = APP.with(|a| a.borrow().as_ref().unwrap().hwnd);
-    for (id, name, spec) in [(HK_CAPTURE, "capture", &cfg.hotkeys.capture), (HK_SHELF, "shelf", &cfg.hotkeys.shelf)] {
+    // The capture key goes through the low-level hook so it can override PrtScrn.
+    match config::parse_hotkey(&cfg.hotkeys.capture) {
+        Ok(hk) => {
+            hook::set_capture_key(Some(hk));
+            log::info!("hotkey capture = {}", cfg.hotkeys.capture);
+        }
+        Err(e) => {
+            hook::set_capture_key(None);
+            log::error!("hotkey capture: {e}");
+        }
+    }
+    for (id, name, spec) in [(HK_SHELF, "shelf", &cfg.hotkeys.shelf)] {
         unsafe {
             let _ = UnregisterHotKey(Some(hwnd), id);
         }
@@ -270,7 +290,6 @@ fn reload_config() {
 
 fn on_hotkey(id: i32) {
     match id {
-        HK_CAPTURE => log::info!("capture hotkey"),
         HK_SHELF => log::info!("shelf hotkey"),
         _ => {}
     }
@@ -303,6 +322,23 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) 
             }
             WM_HOTKEY => {
                 on_hotkey(wp.0 as i32);
+                LRESULT(0)
+            }
+            WM_APP_CAPTURE => {
+                let t0 = hook::PRESSED_AT.lock().unwrap().take().unwrap_or_else(std::time::Instant::now);
+                overlay::show(t0);
+                LRESULT(0)
+            }
+            WM_RENDERFORMAT => {
+                clipboard::render_format(wp.0 as u32);
+                LRESULT(0)
+            }
+            WM_RENDERALLFORMATS => {
+                clipboard::render_all(hwnd);
+                LRESULT(0)
+            }
+            WM_DESTROYCLIPBOARD => {
+                clipboard::release();
                 LRESULT(0)
             }
             WM_APP_RELOAD => {

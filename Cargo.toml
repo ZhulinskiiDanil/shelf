@@ -5,13 +5,27 @@ edition = "2024"
 
 [dependencies]
 log = "0.4.34"
+png = "0.18.1"
 serde = { version = "1.0.229", features = ["derive"] }
 toml = "1.1.8"
+
+[dependencies.windows-numerics]
+version = "*"
 
 [dependencies.windows]
 version = "0.62.2"
 features = [
     "Win32_Foundation",
+    "Win32_Graphics_Direct2D",
+    "Win32_Graphics_Direct2D_Common",
+    "Win32_Graphics_DirectWrite",
+    "Win32_Graphics_Dwm",
+    "Win32_Graphics_Dxgi_Common",
+    "Win32_System_Com",
+    "Win32_System_DataExchange",
+    "Win32_System_Memory",
+    "Win32_System_Ole",
+    "Win32_System_SystemServices",
     "Win32_Graphics_Gdi",
     "Win32_Security",
     "Win32_Storage_FileSystem",

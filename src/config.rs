@@ -7,6 +7,19 @@ pub struct Config {
     pub log_level: String,
     pub autostart: bool,
     pub hotkeys: Hotkeys,
+    pub capture: Capture,
+}
+
+#[derive(Debug, Clone, Deserialize, PartialEq)]
+#[serde(default)]
+pub struct Capture {
+    pub magnifier: bool,
+}
+
+impl Default for Capture {
+    fn default() -> Self {
+        Self { magnifier: true }
+    }
 }
 
 #[derive(Debug, Clone, Deserialize, PartialEq)]
@@ -18,7 +31,7 @@ pub struct Hotkeys {
 
 impl Default for Config {
     fn default() -> Self {
-        Self { log_level: "info".into(), autostart: false, hotkeys: Hotkeys::default() }
+        Self { log_level: "info".into(), autostart: false, hotkeys: Hotkeys::default(), capture: Capture::default() }
     }
 }
 
@@ -39,6 +52,10 @@ autostart = false
 [hotkeys]
 capture = "PrintScreen"
 shelf = "Ctrl+Shift+Space"
+
+[capture]
+# Pixel magnifier next to the cursor
+magnifier = true
 "#;
 
 pub fn app_dir() -> PathBuf {
