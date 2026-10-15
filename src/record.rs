@@ -35,7 +35,29 @@ pub fn is_recording() -> bool {
     SESSION.lock().unwrap().is_some()
 }
 
-pub fn start(rect: Rect, fps: u32, cursor: bool) -> Option<Rect> {
+/// Which sound to record next to the video.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct AudioSources {
+    pub system: bool,
+    pub mic: bool,
+}
+
+impl AudioSources {
+    pub fn parse(s: &str) -> Self {
+        match s.trim().to_ascii_lowercase().as_str() {
+            "mic" => AudioSources { system: false, mic: true },
+            "both" => AudioSources { system: true, mic: true },
+            "none" | "off" => AudioSources { system: false, mic: false },
+            _ => AudioSources { system: true, mic: false },
+        }
+    }
+
+    fn any(&self) -> bool {
+        self.system || self.mic
+    }
+}
+
+pub fn start(rect: Rect, fps: u32, cursor: bool, audio: AudioSources) -> Option<Rect> {
     let mut s = SESSION.lock().unwrap();
     if s.is_some() {
         return None;
@@ -49,7 +71,7 @@ pub fn start(rect: Rect, fps: u32, cursor: bool) -> Option<Rect> {
     let flag = stop.clone();
     let fps = fps.clamp(5, 60);
     let path = std::env::temp_dir().join(format!("shelf-rec-{}.mp4", std::process::id()));
-    let thread = std::thread::spawn(move || run(rect, path, fps, cursor, &flag));
+    let thread = std::thread::spawn(move || run(rect, path, fps, cursor, audio, &flag));
     *s = Some(Session { stop, thread, started: Instant::now() });
     log::info!("record: started {}x{} @ {fps} fps", rect.w(), rect.h());
     Some(rect)
@@ -78,7 +100,7 @@ fn pack(hi: u32, lo: u32) -> u64 {
     ((hi as u64) << 32) | lo as u64
 }
 
-fn run(rect: Rect, path: PathBuf, fps: u32, cursor: bool, stop: &AtomicBool) -> std::result::Result<(PathBuf, Image, u32), String> {
+fn run(rect: Rect, path: PathBuf, fps: u32, cursor: bool, audio: AudioSources, stop: &AtomicBool) -> std::result::Result<(PathBuf, Image, u32), String> {
     let e = |e: Error| e.to_string();
     let (w, h) = (rect.w(), rect.h());
     unsafe {
@@ -112,6 +134,10 @@ fn run(rect: Rect, path: PathBuf, fps: u32, cursor: bool, stop: &AtomicBool) -> 
         // Positive stride = top-down rows, matching our DIB section.
         inp.SetUINT32(&MF_MT_DEFAULT_STRIDE, (w * 4) as u32).map_err(e)?;
         writer.SetInputMediaType(stream, &inp, None).map_err(e)?;
+        // Sound: started before the first frame so both timelines begin together.
+        let sources: Vec<crate::audio::Stream> = [(audio.system, true), (audio.mic, false)].into_iter().filter(|s| s.0).map(|s| crate::audio::Stream::start(s.1)).collect();
+        let astream = if audio.any() { Some(add_audio_stream(&writer).map_err(e)?) } else { None };
+        let mut apos: u64 = 0; // stereo frames written
         writer.BeginWriting().map_err(e)?;
 
         // GDI frame buffer.
@@ -152,6 +178,12 @@ fn run(rect: Rect, path: PathBuf, fps: u32, cursor: bool, stop: &AtomicBool) -> 
                 result = Err(err.to_string());
                 break;
             }
+            if let Some(a) = astream {
+                if let Err(err) = pump_audio(&writer, a, &sources, &mut apos, start.elapsed(), false) {
+                    result = Err(err.to_string());
+                    break;
+                }
+            }
             n += 1;
             // If we fell behind (slow encoder), skip ahead instead of bursting.
             let behind = start.elapsed().as_secs_f64() / period.as_secs_f64();
@@ -159,6 +191,10 @@ fn run(rect: Rect, path: PathBuf, fps: u32, cursor: bool, stop: &AtomicBool) -> 
                 n = behind as u32;
             }
         }
+        if let Some(a) = astream {
+            let _ = pump_audio(&writer, a, &sources, &mut apos, start.elapsed(), true);
+        }
+        drop(sources);
         SelectObject(dc, old);
         let _ = DeleteObject(bmp.into());
         let _ = DeleteDC(dc);
@@ -168,6 +204,71 @@ fn run(rect: Rect, path: PathBuf, fps: u32, cursor: bool, stop: &AtomicBool) -> 
         result?;
         Ok((path, first.ok_or("no frames")?, n))
     }
+}
+
+/// AAC 48 kHz stereo, 128 kbit/s, fed with 16-bit PCM.
+unsafe fn add_audio_stream(writer: &IMFSinkWriter) -> Result<u32> {
+    unsafe {
+        let rate = crate::audio::REC_RATE;
+        let out = MFCreateMediaType()?;
+        guid_attr(&out, &MF_MT_MAJOR_TYPE, &MFMediaType_Audio)?;
+        guid_attr(&out, &MF_MT_SUBTYPE, &MFAudioFormat_AAC)?;
+        out.SetUINT32(&MF_MT_AUDIO_BITS_PER_SAMPLE, 16)?;
+        out.SetUINT32(&MF_MT_AUDIO_SAMPLES_PER_SECOND, rate)?;
+        out.SetUINT32(&MF_MT_AUDIO_NUM_CHANNELS, 2)?;
+        out.SetUINT32(&MF_MT_AUDIO_AVG_BYTES_PER_SECOND, AUDIO_BPS / 8)?;
+        let s = writer.AddStream(&out)?;
+        let inp = MFCreateMediaType()?;
+        guid_attr(&inp, &MF_MT_MAJOR_TYPE, &MFMediaType_Audio)?;
+        guid_attr(&inp, &MF_MT_SUBTYPE, &MFAudioFormat_PCM)?;
+        inp.SetUINT32(&MF_MT_AUDIO_BITS_PER_SAMPLE, 16)?;
+        inp.SetUINT32(&MF_MT_AUDIO_SAMPLES_PER_SECOND, rate)?;
+        inp.SetUINT32(&MF_MT_AUDIO_NUM_CHANNELS, 2)?;
+        inp.SetUINT32(&MF_MT_AUDIO_BLOCK_ALIGNMENT, 4)?;
+        inp.SetUINT32(&MF_MT_AUDIO_AVG_BYTES_PER_SECOND, rate * 4)?;
+        writer.SetInputMediaType(s, &inp, None)?;
+        Ok(s)
+    }
+}
+
+pub const AUDIO_BPS: u32 = 128_000;
+
+/// Writes mixed sound up to the wall-clock time (minus a small margin for device
+/// latency unless `last`). Missing input is silence: loopback delivers nothing while
+/// nothing plays. A source far ahead of the clock is trimmed to keep sync.
+unsafe fn pump_audio(writer: &IMFSinkWriter, stream: u32, sources: &[crate::audio::Stream], pos: &mut u64, elapsed: Duration, last: bool) -> Result<()> {
+    let rate = crate::audio::REC_RATE as u64;
+    let margin = if last { 0 } else { rate / 10 };
+    let target = (elapsed.as_secs_f64() * rate as f64) as u64;
+    let target = target.saturating_sub(margin);
+    if target <= *pos + rate / 50 && !last {
+        return Ok(()); // batch at least 20 ms
+    }
+    let frames = target.saturating_sub(*pos) as usize;
+    if frames == 0 {
+        return Ok(());
+    }
+    let parts: Vec<Vec<f32>> = sources
+        .iter()
+        .map(|s| {
+            let v = s.take(frames * 2);
+            let mut q = s.queue.lock().unwrap();
+            let backlog = q.len();
+            if backlog > (rate as usize / 4) * 2 {
+                q.drain(..backlog - (rate as usize / 20) * 2);
+            }
+            v
+        })
+        .collect();
+    let pcm = crate::audio::mix_i16(&parts, frames * 2);
+    unsafe {
+        let bytes = std::slice::from_raw_parts(pcm.as_ptr() as *const u8, pcm.len() * 2);
+        let t = (*pos as i64) * 10_000_000 / rate as i64;
+        let d = (frames as i64) * 10_000_000 / rate as i64;
+        write_frame(writer, stream, bytes, t, d)?;
+    }
+    *pos += frames as u64;
+    Ok(())
 }
 
 unsafe fn write_frame(writer: &IMFSinkWriter, stream: u32, px: &[u8], t: i64, dur: i64) -> Result<()> {
@@ -227,6 +328,14 @@ mod tests {
     fn even_dimensions() {
         assert_eq!(even_rect(&Rect::new(-101, 5, 0, 106)), Rect::new(-101, 5, -1, 105));
         assert_eq!(even_rect(&Rect::new(0, 0, 640, 480)), Rect::new(0, 0, 640, 480));
+    }
+
+    #[test]
+    fn audio_sources_parse() {
+        assert_eq!(AudioSources::parse("both"), AudioSources { system: true, mic: true });
+        assert_eq!(AudioSources::parse(" Mic "), AudioSources { system: false, mic: true });
+        assert_eq!(AudioSources::parse("none"), AudioSources { system: false, mic: false });
+        assert_eq!(AudioSources::parse("whatever"), AudioSources { system: true, mic: false });
     }
 
     #[test]

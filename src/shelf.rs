@@ -293,7 +293,7 @@ impl Shelf {
                     "Shelf is empty — captures and copied images appear here".to_string()
                 } else {
                     format!(
-                        "{} items   ·   drag out   ·   Ctrl+C image   ·   Ctrl+Shift+C path   ·   T text   ·   R privacy   ·   P pin   ·   Del delete   ·   O folder",
+                        "{} items   ·   drag out   ·   Ctrl+C image   ·   Ctrl+Shift+C path   ·   T text   ·   R privacy   ·   G gif   ·   P pin   ·   Del delete   ·   O folder",
                         self.items.len()
                     )
                 };
@@ -327,9 +327,10 @@ impl Shelf {
                     let d = D2D_RECT_F { left: cx - w / 2.0, top: cy - h / 2.0, right: cx + w / 2.0, bottom: cy + h / 2.0 };
                     rt.DrawBitmap(&b, Some(&d), 1.0, D2D1_BITMAP_INTERPOLATION_MODE_LINEAR, None);
                 }
-                if self.items[i].file.ends_with(".mp4") {
+                let badge = if self.items[i].file.ends_with(".mp4") { Some("▶ MP4") } else if self.items[i].file.ends_with(".gif") { Some("▶ GIF") } else { None };
+                if let Some(badge) = badge {
                     if let (Some(f), Some(bg)) = (&fmt, brush(0x000000, 0.7)) {
-                        let t: Vec<u16> = "▶ MP4".encode_utf16().collect();
+                        let t: Vec<u16> = badge.encode_utf16().collect();
                         let lr = D2D_RECT_F { left: rf.right - 58.0 * s, top: rf.bottom - 22.0 * s, right: rf.right - 4.0 * s, bottom: rf.bottom - 4.0 * s };
                         rt.FillRectangle(&lr, &bg);
                         let tr = D2D_RECT_F { left: lr.left + 6.0 * s, top: lr.top + 1.0 * s, right: lr.right, bottom: lr.bottom };
@@ -358,6 +359,11 @@ impl Shelf {
     fn copy_image(&self) {
         let Some(&i) = self.sorted_selection().first() else { return };
         let path = history::path_of(&self.items[i].file);
+        // Videos and GIFs go to the clipboard as files: Ctrl+V in a chat attaches them.
+        if !self.items[i].file.ends_with(".png") {
+            clipboard::set_files(self.hwnd, &[path]);
+            return;
+        }
         if let Some(img) = std::fs::read(&path).ok().and_then(|b| crate::imageio::decode_png(&b)) {
             clipboard::set_image(self.hwnd, std::sync::Arc::new(img));
         }
@@ -369,6 +375,29 @@ impl Shelf {
         if let Some(img) = std::fs::read(&path).ok().and_then(|b| crate::imageio::decode_png(&b)) {
             crate::ocr_to_clipboard(std::sync::Arc::new(img));
         }
+    }
+
+    /// Converts the selected recording to a GIF (M16): added to the shelf and copied as a file.
+    fn make_gif(&self) {
+        let Some(&i) = self.sorted_selection().first() else { return };
+        if !self.items[i].file.ends_with(".mp4") {
+            return;
+        }
+        let src = history::path_of(&self.items[i].file);
+        let max_bytes = (crate::config::current().record.max_mb.max(0.0) * 1_000_000.0) as u64;
+        std::thread::spawn(move || match crate::gifout::from_video(&src, crate::GIF_FPS, crate::GIF_MAX_W, max_bytes) {
+            Ok((bytes, thumb)) => {
+                let tmp = std::env::temp_dir().join(format!("shelf-gif-{}.gif", std::process::id()));
+                if std::fs::write(&tmp, bytes).is_ok() {
+                    if let Some(path) = history::add_file(&tmp, "gif", &thumb, "gif") {
+                        crate::run_on_main(move || {
+                            clipboard::set_files(crate::main_hwnd(), &[path]);
+                        });
+                    }
+                }
+            }
+            Err(e) => log::error!("gif failed: {e}"),
+        });
     }
 
     /// Opens the selected capture in markup and runs the personal-data check (M15).
@@ -659,6 +688,7 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) 
                     VK_P => s.toggle_pin(),
                     VK_T => s.copy_text(),
                     VK_R => s.check_privacy(),
+                    VK_G => s.make_gif(),
                     VK_O => s.open_folder(),
                     VK_RETURN => s.open_file(),
                     VK_LEFT => s.move_sel(-1),

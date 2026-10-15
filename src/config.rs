@@ -167,11 +167,17 @@ pub struct Record {
     pub fps: u32,
     /// Draw the mouse cursor into the video.
     pub cursor: bool,
+    /// Sound: "system" (what plays), "mic", "both" or "none".
+    pub audio: String,
+    /// Re-encode to fit this size in MB (Discord: 10); 0 = no limit.
+    pub max_mb: f64,
+    /// "mp4" or "gif".
+    pub format: String,
 }
 
 impl Default for Record {
     fn default() -> Self {
-        Self { stop: "Ctrl+Alt+R".into(), fps: 30, cursor: true }
+        Self { stop: "Ctrl+Alt+R".into(), fps: 30, cursor: true, audio: "system".into(), max_mb: 10.0, format: "mp4".into() }
     }
 }
 
@@ -474,6 +480,12 @@ unload_after_min = 5
 stop = "Ctrl+Alt+R"
 fps = 30
 cursor = true
+# Sound: system (what plays), mic, both or none
+audio = "system"
+# Re-encode a longer recording to fit this size in MB (Discord without Nitro: 10); 0 = no limit
+max_mb = 10.0
+# mp4 or gif (gif has no sound)
+format = "mp4"
 
 # A short chip next to the cursor showing what was just copied (in any app)
 [clipboard_chip]

@@ -961,7 +961,7 @@ impl Overlay {
             Finish::Record => {
                 // The area, not the pixels: recording grabs live frames.
                 let cfg = config::current().record;
-                if let Some(r) = crate::record::start(target, cfg.fps, cfg.cursor) {
+                if let Some(r) = crate::record::start(target, cfg.fps, cfg.cursor, crate::record::AudioSources::parse(&cfg.audio)) {
                     crate::ink::with(|i| {
                         i.rec_rect = Some(r);
                         i.request_render();

@@ -4,6 +4,7 @@ version = "1.0.0"
 edition = "2024"
 
 [dependencies]
+gif = "0.13"
 log = "0.4.34"
 png = "0.18.1"
 regex = "1.13.1"

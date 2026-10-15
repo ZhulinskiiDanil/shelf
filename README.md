@@ -7,7 +7,7 @@ A fast, fully offline screenshot tool for Windows 10/11: a Lightshot replacement
 - **Screen ink** — draw over everything while holding `Caps Lock`; the ink fades and is visible in screen sharing. Laser pointer, spotlight, zoom, click rings, pressed-keys overlay.
 - **Board** — a translucent canvas for sketching; saved to the shelf.
 - **Dictation** — hold a key, speak, get text (local Whisper model).
-- **Recording** — any area to MP4.
+- **Recording** — any area to MP4 with system sound and/or microphone, automatically shrunk to fit Discord's 10 MB limit (or as a GIF) and copied as a file — `Ctrl+V` in a chat attaches it.
 - **Long screenshots** — scroll and stitch any area (fixed headers and footers appear once).
 - **Check before sending** — find emails, phones, IPs, card numbers, tokens and secret links in a capture (OCR) and hide them irreversibly.
 - **Clipboard chip** — whatever you copy anywhere (color, link, file, JSON, image, text, code) briefly shows next to the cursor; secrets are masked.
@@ -75,8 +75,9 @@ All hotkeys are defaults and can be changed in Settings, which also reports conf
 |---|---|
 | Click, `Ctrl`/`Shift`+click, `Ctrl+A`, arrows | Select |
 | Drag | Drag files out (the shelf closes after a drop) |
-| `Ctrl+C` · `Ctrl+Shift+C` · `T` | Copy image · copy quoted paths · copy text (OCR) |
+| `Ctrl+C` · `Ctrl+Shift+C` · `T` | Copy image (recordings and GIFs: as a file) · copy quoted paths · copy text (OCR) |
 | `R` | Check the capture for personal data and redact it |
+| `G` | Convert the selected recording to a GIF (added to the shelf and copied as a file) |
 | `P` · `Del` · `O` · `Enter`, double click | Pin · delete · show in folder · open |
 | `Esc`, click outside | Close |
 | `Tab`, click the header | Switch between Captures and Text (text: type to search, `Enter` / `Ctrl+C` copy, `Ctrl+P` pin, `Del` delete, drag a row out) |

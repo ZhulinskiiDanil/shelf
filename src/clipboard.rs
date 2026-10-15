@@ -9,6 +9,7 @@ use windows::Win32::System::Memory::*;
 use windows::Win32::System::Ole::CF_DIB;
 use windows::core::w;
 
+#[derive(Clone)]
 pub struct Image {
     pub w: u32,
     pub h: u32,

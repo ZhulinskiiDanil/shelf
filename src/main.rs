@@ -30,6 +30,8 @@ mod shelf;
 mod stitch;
 mod texthist;
 mod textpick;
+mod transcode;
+mod gifout;
 
 use std::cell::RefCell;
 use std::path::Path;
@@ -759,6 +761,9 @@ pub fn trim_working_set() {
 
 // ! --- Area recording --- !
 
+pub const GIF_FPS: u32 = 15;
+pub const GIF_MAX_W: u32 = 720;
+
 fn stop_recording() {
     if !record::is_recording() {
         return;
@@ -770,8 +775,30 @@ fn stop_recording() {
     // Finalizing the MP4 takes a moment; keep the UI thread free.
     std::thread::spawn(|| match record::stop() {
         Some(Ok((tmp, first))) => {
-            if let Some(path) = history::add_file(&tmp, "mp4", &first, "record") {
-                log::info!("record: saved {}", path.display());
+            let cfg = config::current().record;
+            let max_bytes = (cfg.max_mb.max(0.0) * 1_000_000.0) as u64;
+            let (file, ext, thumb) = if cfg.format.eq_ignore_ascii_case("gif") {
+                match gifout::from_video(&tmp, GIF_FPS, GIF_MAX_W, max_bytes) {
+                    Ok((bytes, thumb)) => {
+                        let g = tmp.with_extension("gif");
+                        let _ = std::fs::write(&g, bytes);
+                        let _ = std::fs::remove_file(&tmp);
+                        (g, "gif", thumb)
+                    }
+                    Err(e) => {
+                        log::error!("gif failed: {e}");
+                        (tmp, "mp4", first)
+                    }
+                }
+            } else {
+                if let Err(e) = transcode::fit_to_limit(&tmp, max_bytes) {
+                    log::warn!("record: could not fit the size limit: {e}");
+                }
+                (tmp, "mp4", first)
+            };
+            if let Some(path) = history::add_file(&file, ext, &thumb, "record") {
+                let mb = std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0) as f64 / 1e6;
+                log::info!("record: saved {} ({mb:.1} MB)", path.display());
                 run_on_main(move || {
                     clipboard::set_files(main_hwnd(), &[path]);
                 });
