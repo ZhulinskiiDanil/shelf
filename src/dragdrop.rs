@@ -67,7 +67,9 @@ pub fn drag_files(paths: &[PathBuf], image: Option<&Image>, click_to_drop: bool)
             return false;
         }
         let consts: Vec<*const ITEMIDLIST> = pidls.iter().map(|p| *p as *const _).collect();
-        let data: Result<IDataObject> = SHCreateDataObject(None, Some(&consts), None);
+        // The shell's own data object (as Explorer drags it): unlike SHCreateDataObject it
+        // also renders CF_HDROP, which Chromium/Electron targets (Discord, browsers) require.
+        let data: Result<IDataObject> = SHCreateShellItemArrayFromIDLists(&consts).and_then(|a: IShellItemArray| a.BindToHandler(None, &BHID_DataObject));
         for p in &pidls {
             ILFree(Some(*p));
         }
