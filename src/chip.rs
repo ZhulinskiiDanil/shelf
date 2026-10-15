@@ -331,6 +331,8 @@ use windows_numerics::Vector2;
 const CLASS: PCWSTR = w!("Shelf.Chip");
 const TIMER_HIDE: usize = 1;
 const TIMER_FADE: usize = 2;
+/// While shown, the chip follows the cursor (moved, not redrawn).
+const TIMER_FOLLOW: usize = 3;
 /// The swap chain is allocated once at this size; the window itself is sized to the chip,
 /// so DWM only composes a small surface (a full-screen layer slowed down capture hiding).
 const SURFACE: (u32, u32) = (900, 520);
@@ -340,6 +342,8 @@ struct ChipState {
     at: (i32, i32),
     fade_start: Option<Instant>,
     bmp: Option<ID2D1Bitmap1>,
+    /// Window position minus cursor position, set on first placement.
+    offset: Option<(i32, i32)>,
 }
 
 struct Win {
@@ -387,12 +391,13 @@ pub fn init() {
 /// Shows (or replaces) the chip; it hides itself after `duration_ms`.
 pub fn show(content: Content, at: (i32, i32)) {
     with_win(|w| {
-        w.chip = Some(ChipState { content, at, fade_start: None, bmp: None });
+        w.chip = Some(ChipState { content, at, fade_start: None, bmp: None, offset: None });
         let ms = crate::config::current().clipboard_chip.duration_ms.clamp(200, 10_000) as u32;
         unsafe {
             let _ = KillTimer(Some(w.hwnd), TIMER_FADE);
             let _ = KillTimer(Some(w.hwnd), TIMER_HIDE);
             SetTimer(Some(w.hwnd), TIMER_HIDE, ms, None);
+            SetTimer(Some(w.hwnd), TIMER_FOLLOW, 8, None);
         }
         w.render();
     });
@@ -403,6 +408,7 @@ impl Win {
         self.chip = None;
         unsafe {
             let _ = KillTimer(Some(self.hwnd), TIMER_FADE);
+            let _ = KillTimer(Some(self.hwnd), TIMER_FOLLOW);
             let _ = KillTimer(Some(self.hwnd), TIMER_HIDE);
             let _ = ShowWindow(self.hwnd, SW_HIDE);
         }
@@ -435,9 +441,31 @@ impl Win {
         };
         let (w, h) = (placed.w().min(SURFACE.0 as i32), placed.h().min(SURFACE.1 as i32));
         unsafe {
-            let _ = SetWindowPos(self.hwnd, Some(HWND_TOPMOST), placed.l, placed.t, w, h, SWP_NOACTIVATE | SWP_SHOWWINDOW);
+            // Keep the position the chip already follows; only the first render places it.
+            let (mut x, mut y) = (placed.l, placed.t);
+            let mut pt = POINT::default();
+            let _ = GetCursorPos(&mut pt);
+            match chip.offset {
+                Some((dx, dy)) => (x, y) = (pt.x + dx, pt.y + dy),
+                None => chip.offset = Some((x - pt.x, y - pt.y)),
+            }
+            let _ = SetWindowPos(self.hwnd, Some(HWND_TOPMOST), x, y, w, h, SWP_NOACTIVATE | SWP_SHOWWINDOW);
         }
         self.chip = Some(chip);
+    }
+
+    fn follow(&mut self) {
+        let Some((dx, dy)) = self.chip.as_ref().and_then(|c| c.offset) else { return };
+        unsafe {
+            let mut pt = POINT::default();
+            let _ = GetCursorPos(&mut pt);
+            let mut r = RECT::default();
+            let _ = GetWindowRect(self.hwnd, &mut r);
+            let (x, y) = (pt.x + dx, pt.y + dy);
+            if (x, y) != (r.left, r.top) {
+                let _ = SetWindowPos(self.hwnd, Some(HWND_TOPMOST), x, y, 0, 0, SWP_NOACTIVATE | SWP_NOSIZE);
+            }
+        }
     }
 
     fn expired(&mut self) {
@@ -462,6 +490,10 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) 
         match msg {
             WM_TIMER if wp.0 == TIMER_HIDE => {
                 with_win(|w| w.expired());
+                LRESULT(0)
+            }
+            WM_TIMER if wp.0 == TIMER_FOLLOW => {
+                with_win(|w| w.follow());
                 LRESULT(0)
             }
             WM_TIMER if wp.0 == TIMER_FADE => {
