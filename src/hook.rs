@@ -71,7 +71,7 @@ unsafe extern "system" fn proc(code: i32, wp: WPARAM, lp: LPARAM) -> LRESULT {
             if dict_key(k.vkCode, down) {
                 return LRESULT(1);
             }
-            if ink_key(k.vkCode, down) {
+            if k.flags.0 & LLKHF_INJECTED.0 == 0 && ink_key(k.vkCode, down) {
                 return LRESULT(1);
             }
             if down && FEATURES.load(Ordering::Relaxed) & F_KEYS != 0 {
@@ -137,6 +137,8 @@ static HOLD_VK: AtomicU32 = AtomicU32::new(0);
 /// 1 = XBUTTON1, 2 = XBUTTON2, 0 = keyboard.
 static HOLD_XBUTTON: AtomicU32 = AtomicU32::new(0);
 static HOLDING: AtomicBool = AtomicBool::new(false);
+/// When the hold started and where the cursor was: a short press without moving is a tap.
+static HOLD_START: Mutex<Option<(Instant, POINT)>> = Mutex::new(None);
 pub static STICKY: AtomicBool = AtomicBool::new(false);
 static HOOK_THREAD: AtomicU32 = AtomicU32::new(0);
 const WM_HOOK_MOUSE: u32 = WM_USER + 1;
@@ -211,11 +213,17 @@ fn ink_key(vk: u32, down: bool) -> bool {
         if down && !was {
             let laser = unsafe { GetAsyncKeyState(VK_CONTROL.0 as i32) } < 0;
             LASER.store(laser, Ordering::Relaxed);
+            let mut pt = POINT::default();
+            let _ = unsafe { GetCursorPos(&mut pt) };
+            *HOLD_START.lock().unwrap() = Some((Instant::now(), pt));
             update_mouse_hook();
             post_ink(if laser { INK_LASER_DOWN } else { INK_HOLD_DOWN }, 0);
         } else if !down && was {
             update_mouse_hook();
             post_ink(if LASER.load(Ordering::Relaxed) { INK_LASER_UP } else { INK_HOLD_UP }, 0);
+            if hold == VK_CAPITAL.0 as u32 && was_tap() {
+                toggle_caps_lock();
+            }
         }
         return true;
     }
@@ -235,6 +243,25 @@ fn ink_key(vk: u32, down: bool) -> bool {
         return true;
     }
     false
+}
+
+/// The hold key was tapped (short press, cursor did not move): nothing was drawn.
+fn was_tap() -> bool {
+    let Some((t, p0)) = HOLD_START.lock().unwrap().take() else { return false };
+    let mut p = POINT::default();
+    let _ = unsafe { GetCursorPos(&mut p) };
+    t.elapsed().as_millis() < 300 && (p.x - p0.x).abs() <= 4 && (p.y - p0.y).abs() <= 4
+}
+
+/// A tap on Caps Lock keeps its usual meaning: replay it as an injected press, which the hook lets through.
+fn toggle_caps_lock() {
+    let ev = |up: bool| INPUT {
+        r#type: INPUT_KEYBOARD,
+        Anonymous: INPUT_0 { ki: KEYBDINPUT { wVk: VK_CAPITAL, dwFlags: if up { KEYEVENTF_KEYUP } else { KEYBD_EVENT_FLAGS(0) }, ..Default::default() } },
+    };
+    unsafe {
+        SendInput(&[ev(false), ev(true)], size_of::<INPUT>() as i32);
+    }
 }
 
 unsafe extern "system" fn mouse_proc(code: i32, wp: WPARAM, lp: LPARAM) -> LRESULT {
