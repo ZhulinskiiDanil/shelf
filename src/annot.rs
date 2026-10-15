@@ -23,22 +23,6 @@ pub enum Tool {
 
 pub const TOOLS: [Tool; 9] = [Tool::Pen, Tool::Line, Tool::Arrow, Tool::Rect, Tool::Ellipse, Tool::Marker, Tool::Text, Tool::Blur, Tool::Number];
 
-impl Tool {
-    pub fn glyph(self) -> &'static str {
-        match self {
-            Tool::Pen => "✎",
-            Tool::Line => "╱",
-            Tool::Arrow => "↗",
-            Tool::Rect => "▭",
-            Tool::Ellipse => "◯",
-            Tool::Marker => "▌",
-            Tool::Text => "T",
-            Tool::Blur => "▦",
-            Tool::Number => "①",
-        }
-    }
-}
-
 pub const PALETTE: [u32; 8] = [0xE53935, 0xFB8C00, 0xFDD835, 0x43A047, 0x1E88E5, 0x8E24AA, 0xFFFFFF, 0x000000];
 
 #[derive(Debug, Clone, PartialEq)]
@@ -137,17 +121,19 @@ pub fn pixelate(buf: &mut [u8], stride: usize, origin: (i32, i32), size: (i32, i
 /// Toolbar: one row of square buttons under the selection (above it, or inside, when there is no room).
 /// Returns button rects in order: TOOLS, then the 8 palette swatches.
 pub fn toolbar_layout(sel: &Rect, mon: &Rect, scale: f32) -> Vec<Rect> {
-    let b = (28.0 * scale).round() as i32;
+    let b = (34.0 * scale).round() as i32;
     let gap = (4.0 * scale).round() as i32;
+    // Clear of the selection handles and of the panel padding drawn around the buttons.
+    let off = (8.0 * scale).round() as i32;
     let n = (TOOLS.len() + PALETTE.len()) as i32;
     let width = n * b + gap; // extra gap between tools and palette
-    let mut x = (sel.r - width).max(mon.l).min(mon.r - width);
-    let y = if sel.b + gap + b <= mon.b {
-        sel.b + gap
-    } else if sel.t - gap - b >= mon.t {
-        sel.t - gap - b
+    let mut x = (sel.r - width).max(mon.l + off).min(mon.r - width - off);
+    let y = if sel.b + off + b <= mon.b {
+        sel.b + off
+    } else if sel.t - off - b >= mon.t {
+        sel.t - off - b
     } else {
-        sel.b - gap - b
+        sel.b.min(mon.b) - off - b
     };
     x = x.max(mon.l);
     (0..n)
@@ -381,7 +367,7 @@ mod tests {
         let mon = Rect::new(0, 0, 1920, 1080);
         let bar = toolbar_layout(&Rect::new(10, 10, 100, 100), &mon, 1.0);
         assert_eq!(bar.len(), TOOLS.len() + PALETTE.len());
-        assert!(bar.iter().all(|r| r.l >= 0 && r.r <= 1920 && r.t == 104));
+        assert!(bar.iter().all(|r| r.l >= 0 && r.r <= 1920 && r.t == 108));
         // Selection touching the bottom: bar goes above.
         let bar = toolbar_layout(&Rect::new(500, 600, 1500, 1080), &mon, 1.0);
         assert!(bar[0].b <= 600);

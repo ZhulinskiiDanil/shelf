@@ -51,7 +51,7 @@ All hotkeys are defaults and can be changed in Settings, which also reports conf
 
 | Keys | Action |
 |---|---|
-| Drag · click | Select area · select the window under the cursor |
+| Drag · click · double click | Select area · select the window under the cursor · select the whole monitor |
 | Drag edges, corners, inside | Resize / move the selection |
 | `←` `↑` `→` `↓` (`Shift` ×10) | Nudge the selection by 1 px |
 | `Ctrl+C` | Copy image and close |
@@ -60,7 +60,7 @@ All hotkeys are defaults and can be changed in Settings, which also reports conf
 | `Ctrl+D` | Attach the file to the cursor; click to drop (`Esc` cancels) |
 | `Ctrl+T` | Recognize text (OCR) and copy it |
 | `Ctrl+R` | Record the selected area to MP4 |
-| `Ctrl+L` | Scrolling (long) screenshot of the selection; `Enter`/`Esc` stops early (`scroll_capture.key`) |
+| `Ctrl+L` | Scrolling (long) screenshot of the selection: scroll yourself, then `Ctrl+C` copies the result or `Enter` opens it for markup (`scroll_capture.key`, `scroll_capture.mode`) |
 | `Ctrl+P` | Check for personal data (OCR): click a box to keep it, `Enter` hides the rest, `Esc` cancels (`redaction.key`) |
 | `Esc`, right click | Cancel |
 | `P` `L` `A` `R` `E` `M` `T` `B` `N` | Pen, line, arrow, rectangle, ellipse, marker, text, pixelate, numbered marker (`[tools]`) |

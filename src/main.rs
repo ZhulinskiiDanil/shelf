@@ -31,6 +31,7 @@ mod stitch;
 mod texthist;
 mod textpick;
 mod transcode;
+mod ui;
 mod gifout;
 
 use std::cell::RefCell;
@@ -145,6 +146,7 @@ fn main() {
         shelf::init();
         board::init();
         textpick::init();
+        follow_dark_mode();
         chip::init();
         settings::init();
         ink::init();
@@ -201,7 +203,10 @@ fn tray_data(hwnd: HWND) -> NOTIFYICONDATAW {
     };
     unsafe {
         let hinst = GetModuleHandleW(None).unwrap();
-        nid.hIcon = LoadIconW(Some(hinst.into()), PCWSTR(1 as _))
+        // The small-icon size for this DPI, so the tray picks the crisp 16/20/24 px image.
+        let (cx, cy) = (GetSystemMetrics(SM_CXSMICON), GetSystemMetrics(SM_CYSMICON));
+        nid.hIcon = LoadImageW(Some(hinst.into()), PCWSTR(1 as _), IMAGE_ICON, cx, cy, LR_DEFAULTCOLOR)
+            .map(|h| HICON(h.0))
             .or_else(|_| LoadIconW(None, IDI_APPLICATION))
             .unwrap_or_default();
     }
@@ -219,6 +224,24 @@ fn add_tray_icon(hwnd: HWND) {
 fn remove_tray_icon(hwnd: HWND) {
     unsafe {
         let _ = Shell_NotifyIconW(NIM_DELETE, &tray_data(hwnd));
+    }
+}
+
+/// Context menus (tray, shelf) follow the Windows app theme. uxtheme has no public API
+/// for this; ordinals 135 (SetPreferredAppMode) and 136 (FlushMenuThemes) are what
+/// Explorer and most Win32 apps use. Missing on old builds: then menus stay light.
+fn follow_dark_mode() {
+    use windows::Win32::System::LibraryLoader::{GetProcAddress, LoadLibraryW};
+    unsafe {
+        let Ok(ux) = LoadLibraryW(w!("uxtheme.dll")) else { return };
+        if let Some(f) = GetProcAddress(ux, PCSTR(135 as *const u8)) {
+            let set: extern "system" fn(i32) -> i32 = std::mem::transmute(f);
+            set(1); // AllowDark: follow the system setting
+        }
+        if let Some(f) = GetProcAddress(ux, PCSTR(136 as *const u8)) {
+            let flush: extern "system" fn() = std::mem::transmute(f);
+            flush();
+        }
     }
 }
 

@@ -38,6 +38,9 @@ struct Shelf {
     factory: ID2D1Factory,
     rt: Option<ID2D1HwndRenderTarget>,
     dw: IDWriteFactory,
+    res: crate::annot::Res,
+    /// Card under the cursor.
+    hover: Option<usize>,
     items: Vec<Entry>,
     thumbs: HashMap<String, Option<ID2D1Bitmap>>,
     selected: HashSet<usize>,
@@ -79,13 +82,17 @@ pub fn init() {
         };
         RegisterClassExW(&wc);
         let hwnd = CreateWindowExW(WS_EX_TOPMOST | WS_EX_TOOLWINDOW, CLASS, w!("Shelf"), WS_POPUP, 0, 0, 100, 100, None, None, Some(hinst.into()), None).unwrap();
+        round_corners(hwnd);
         let factory: ID2D1Factory = D2D1CreateFactory(D2D1_FACTORY_TYPE_SINGLE_THREADED, None).unwrap();
         let dw: IDWriteFactory = DWriteCreateFactory(DWRITE_FACTORY_TYPE_SHARED).unwrap();
+        let res_factory = factory.clone();
         let s = Shelf {
             hwnd,
-            factory,
+            factory: res_factory,
             rt: None,
             dw,
+            res: crate::annot::Res::new(&factory),
+            hover: None,
             items: Vec::new(),
             thumbs: HashMap::new(),
             selected: HashSet::new(),
@@ -122,12 +129,15 @@ pub fn toggle() {
 
 impl Shelf {
     fn cell(&self) -> (i32, i32) {
-        ((200.0 * self.scale) as i32, (140.0 * self.scale) as i32)
+        ((208.0 * self.scale) as i32, (132.0 * self.scale) as i32)
     }
     fn pad(&self) -> i32 {
-        (8.0 * self.scale) as i32
+        (12.0 * self.scale) as i32
     }
     fn header(&self) -> i32 {
+        (46.0 * self.scale) as i32
+    }
+    fn footer(&self) -> i32 {
         (34.0 * self.scale) as i32
     }
 
@@ -141,13 +151,14 @@ impl Shelf {
         let mon = mons.iter().map(|m| m.0).find(|r| r.contains(pt.x, pt.y)).unwrap_or(Rect::new(0, 0, 1920, 1080));
         let (cw, ch) = self.cell();
         let w = COLS * cw + (COLS + 1) * self.pad();
-        let h = self.header() + ROWS * ch + (ROWS + 1) * self.pad();
+        let h = self.header() + ROWS * ch + (ROWS + 1) * self.pad() + self.footer();
         let x = mon.l + (mon.w() - w) / 2;
         let y = mon.t + (mon.h() - h) / 2;
         self.size = (w, h);
         self.items = history::list();
         self.selected.clear();
         self.scroll = 0;
+        self.hover = None;
         if self.rt.is_some() {
             unsafe {
                 let _ = self.rt.as_ref().unwrap().Resize(&D2D_SIZE_U { width: w as u32, height: h as u32 });
@@ -271,86 +282,139 @@ impl Shelf {
         let s = self.scale;
         unsafe {
             let brush = |c: u32, a: f32| rt.CreateSolidColorBrush(&crate::annot::rgba(c, a), None).ok();
-            let (Some(bg), Some(card), Some(accent), Some(text), Some(dim)) =
-                (brush(0x1E1E1E, 1.0), brush(0x2D2D2D, 1.0), brush(0x2F8CFF, 1.0), brush(0xF0F0F0, 1.0), brush(0x9A9A9A, 1.0))
+            let (Some(card), Some(accent), Some(text), Some(dim), Some(line)) =
+                (brush(0x2A2A2E, 1.0), brush(crate::ui::ACCENT, 1.0), brush(0xF2F2F2, 1.0), brush(0x8E8E93, 1.0), brush(0xFFFFFF, 0.07))
             else {
                 return;
             };
-            let fmt = self
-                .dw
-                .CreateTextFormat(w!("Segoe UI"), None, DWRITE_FONT_WEIGHT_NORMAL, DWRITE_FONT_STYLE_NORMAL, DWRITE_FONT_STRETCH_NORMAL, 12.0 * s, w!(""))
-                .ok();
+            let font = |size: f32, weight: DWRITE_FONT_WEIGHT| self.dw.CreateTextFormat(w!("Segoe UI"), None, weight, DWRITE_FONT_STYLE_NORMAL, DWRITE_FONT_STRETCH_NORMAL, size * s, w!("")).ok();
+            let fmt = font(12.0, DWRITE_FONT_WEIGHT_NORMAL);
+            let tabf = font(13.0, DWRITE_FONT_WEIGHT_SEMI_BOLD);
+            let draw = |t: &str, f: &IDWriteTextFormat, r: D2D_RECT_F, b: &ID2D1SolidColorBrush| {
+                let u: Vec<u16> = t.encode_utf16().collect();
+                rt.DrawText(&u, f, &r, b, D2D1_DRAW_TEXT_OPTIONS_CLIP, DWRITE_MEASURING_MODE_NATURAL);
+            };
+            let (w, h) = (self.size.0 as f32, self.size.1 as f32);
             rt.BeginDraw();
-            rt.Clear(Some(&crate::annot::rgba(0x1E1E1E, 1.0)));
-            let full = D2D_RECT_F { left: 0.0, top: 0.0, right: self.size.0 as f32, bottom: self.size.1 as f32 };
-            rt.FillRectangle(&full, &bg);
-            rt.DrawRectangle(&full, &card, 2.0, None);
-            if let Some(f) = &fmt {
-                self.render_tabs(&rt, f, &accent, &text, &dim);
-                let hint = if self.text_tab {
-                    "Enter, Ctrl+C — копировать   ·   перетащите наружу   ·   Ctrl+P — закрепить   ·   Del — удалить   ·   Tab — снимки".to_string()
-                } else if self.items.is_empty() {
-                    "Shelf is empty — captures and copied images appear here".to_string()
-                } else {
-                    format!(
-                        "{} items   ·   drag out   ·   Ctrl+C image   ·   Ctrl+Shift+C path   ·   T text   ·   R privacy   ·   G gif   ·   P pin   ·   Del delete   ·   O folder",
-                        self.items.len()
-                    )
-                };
-                let t: Vec<u16> = hint.encode_utf16().collect();
-                let r = D2D_RECT_F { left: 160.0 * s, top: 9.0 * s, right: self.size.0 as f32, bottom: self.header() as f32 };
-                rt.DrawText(&t, f, &r, &dim, D2D1_DRAW_TEXT_OPTIONS_NONE, DWRITE_MEASURING_MODE_NATURAL);
+            rt.Clear(Some(&crate::annot::rgba(0x1C1C1E, 1.0)));
+            // Header: tabs left, count right; hairline under it. Footer: hints for what is selected.
+            if let (Some(tf), Some(f)) = (&tabf, &fmt) {
+                self.render_tabs(&rt, tf, &accent, &text, &dim);
+                let count = if self.text_tab { plural(self.texts.len(), "запись", "записи", "записей") } else { plural(self.items.len(), "снимок", "снимка", "снимков") };
+                let _ = f.SetTextAlignment(DWRITE_TEXT_ALIGNMENT_TRAILING);
+                draw(&count, f, D2D_RECT_F { left: 0.0, top: 15.0 * s, right: w - 16.0 * s, bottom: self.header() as f32 }, &dim);
+                let _ = f.SetTextAlignment(DWRITE_TEXT_ALIGNMENT_LEADING);
+                rt.FillRectangle(&D2D_RECT_F { left: 0.0, top: self.header() as f32 - 1.0, right: w, bottom: self.header() as f32 }, &line);
+                let fy = h - self.footer() as f32;
+                rt.FillRectangle(&D2D_RECT_F { left: 0.0, top: fy, right: w, bottom: fy + 1.0 }, &line);
+                draw(&self.footer_hint(), f, D2D_RECT_F { left: 16.0 * s, top: fy + 8.0 * s, right: w - 16.0 * s, bottom: h }, &dim);
             }
             if self.text_tab {
-                let small = self.dw.CreateTextFormat(w!("Segoe UI"), None, DWRITE_FONT_WEIGHT_NORMAL, DWRITE_FONT_STYLE_NORMAL, DWRITE_FONT_STRETCH_NORMAL, 11.0 * s, w!("")).ok();
-                let big = self.dw.CreateTextFormat(w!("Segoe UI"), None, DWRITE_FONT_WEIGHT_NORMAL, DWRITE_FONT_STYLE_NORMAL, DWRITE_FONT_STRETCH_NORMAL, 13.0 * s, w!("")).ok();
-                if let (Some(b), Some(sm), Some(selb)) = (big, small, brush(0x2F8CFF, 0.25)) {
+                let small = font(11.0, DWRITE_FONT_WEIGHT_NORMAL);
+                let big = font(13.0, DWRITE_FONT_WEIGHT_NORMAL);
+                if let (Some(b), Some(sm), Some(selb)) = (big, small, brush(crate::ui::ACCENT, 0.22)) {
                     let _ = b.SetWordWrapping(DWRITE_WORD_WRAPPING_NO_WRAP);
                     let _ = sm.SetWordWrapping(DWRITE_WORD_WRAPPING_NO_WRAP);
                     self.render_text_tab(&rt, &b, &sm, &accent, &text, &dim, &selb);
                 }
+            } else if self.items.is_empty() {
+                if let (Some(big), Some(f)) = (font(16.0, DWRITE_FONT_WEIGHT_SEMI_BOLD), &fmt) {
+                    let _ = big.SetTextAlignment(DWRITE_TEXT_ALIGNMENT_CENTER);
+                    let _ = f.SetTextAlignment(DWRITE_TEXT_ALIGNMENT_CENTER);
+                    let cy = h / 2.0;
+                    draw("Здесь появятся снимки", &big, D2D_RECT_F { left: 0.0, top: cy - 24.0 * s, right: w, bottom: cy }, &text);
+                    let key = crate::config::current().hotkeys.capture;
+                    draw(&format!("Нажмите {key}, выделите область — снимок сразу окажется на полке"), f, D2D_RECT_F { left: 0.0, top: cy + 4.0 * s, right: w, bottom: cy + 28.0 * s }, &dim);
+                    let _ = f.SetTextAlignment(DWRITE_TEXT_ALIGNMENT_LEADING);
+                }
             }
+            let radius = 10.0 * s;
             for i in 0..if self.text_tab { 0 } else { self.items.len() } {
                 if !self.visible_row(i) {
                     continue;
                 }
                 let r = self.item_rect(i);
                 let rf = D2D_RECT_F { left: r.l as f32, top: r.t as f32, right: r.r as f32, bottom: r.b as f32 };
+                let shape = D2D1_ROUNDED_RECT { rect: rf, radiusX: radius, radiusY: radius };
+                let hovered = self.hover == Some(i);
+                let selected = self.selected.contains(&i);
+                // Content clipped to the rounded card.
+                let geo = self.factory.CreateRoundedRectangleGeometry(&shape).ok();
+                let params = D2D1_LAYER_PARAMETERS {
+                    contentBounds: rf,
+                    geometricMask: std::mem::ManuallyDrop::new(geo.map(|g| g.into())),
+                    maskAntialiasMode: D2D1_ANTIALIAS_MODE_PER_PRIMITIVE,
+                    maskTransform: windows_numerics::Matrix3x2::identity(),
+                    opacity: 1.0,
+                    opacityBrush: std::mem::ManuallyDrop::new(None),
+                    layerOptions: D2D1_LAYER_OPTIONS_NONE,
+                };
+                rt.PushLayer(&params, None::<&ID2D1Layer>);
                 rt.FillRectangle(&rf, &card);
                 let file = self.items[i].file.clone();
                 if let Some(b) = self.thumb(&rt, &file) {
+                    // Cover the card (crop the overflow), centred.
                     let sz = b.GetSize();
-                    let k = ((r.w() - 8) as f32 / sz.width).min((r.h() - 8) as f32 / sz.height).min(1.0 * s.max(1.0));
-                    let (w, h) = (sz.width * k, sz.height * k);
-                    let cx = (r.l + r.r) as f32 / 2.0;
-                    let cy = (r.t + r.b) as f32 / 2.0;
-                    let d = D2D_RECT_F { left: cx - w / 2.0, top: cy - h / 2.0, right: cx + w / 2.0, bottom: cy + h / 2.0 };
-                    rt.DrawBitmap(&b, Some(&d), 1.0, D2D1_BITMAP_INTERPOLATION_MODE_LINEAR, None);
+                    let k = (rf.right - rf.left) / sz.width;
+                    let k = k.max((rf.bottom - rf.top) / sz.height);
+                    let (tw, th) = (sz.width * k, sz.height * k);
+                    let cx = (rf.left + rf.right) / 2.0;
+                    let cy = (rf.top + rf.bottom) / 2.0;
+                    let d = D2D_RECT_F { left: cx - tw / 2.0, top: cy - th / 2.0, right: cx + tw / 2.0, bottom: cy + th / 2.0 };
+                    rt.DrawBitmap(&b, Some(&d), if hovered || selected { 1.0 } else { 0.92 }, D2D1_BITMAP_INTERPOLATION_MODE_LINEAR, None);
                 }
-                let badge = if self.items[i].file.ends_with(".mp4") { Some("▶ MP4") } else if self.items[i].file.ends_with(".gif") { Some("▶ GIF") } else { None };
-                if let Some(badge) = badge {
-                    if let (Some(f), Some(bg)) = (&fmt, brush(0x000000, 0.7)) {
-                        let t: Vec<u16> = badge.encode_utf16().collect();
-                        let lr = D2D_RECT_F { left: rf.right - 58.0 * s, top: rf.bottom - 22.0 * s, right: rf.right - 4.0 * s, bottom: rf.bottom - 4.0 * s };
-                        rt.FillRectangle(&lr, &bg);
-                        let tr = D2D_RECT_F { left: lr.left + 6.0 * s, top: lr.top + 1.0 * s, right: lr.right, bottom: lr.bottom };
-                        rt.DrawText(&t, f, &tr, &text, D2D1_DRAW_TEXT_OPTIONS_NONE, DWRITE_MEASURING_MODE_NATURAL);
+                if hovered {
+                    // Meta strip: age · size · weight.
+                    if let (Some(shade), Some(f)) = (brush(0, 0.62), &fmt) {
+                        let strip = D2D_RECT_F { left: rf.left, top: rf.bottom - 26.0 * s, right: rf.right, bottom: rf.bottom };
+                        rt.FillRectangle(&strip, &shade);
+                        let e = &self.items[i];
+                        let meta = format!("{}  ·  {}×{}  ·  {}", age(e.created), e.w, e.h, human_size(e.bytes));
+                        let _ = f.SetWordWrapping(DWRITE_WORD_WRAPPING_NO_WRAP);
+                        draw(&meta, f, D2D_RECT_F { left: strip.left + 10.0 * s, top: strip.top + 5.0 * s, right: strip.right - 6.0 * s, bottom: strip.bottom }, &text);
                     }
+                }
+                rt.PopLayer();
+                let file = &self.items[i].file;
+                let badge = if file.ends_with(".mp4") { Some("▶  MP4") } else if file.ends_with(".gif") { Some("▶  GIF") } else { None };
+                if let Some(badge) = badge {
+                    let y = if hovered { rf.bottom - 50.0 * s } else { rf.bottom - 28.0 * s };
+                    crate::ui::pill(&rt, &self.res, badge, rf.left + 8.0 * s, y, s, 0xFFFFFF);
                 }
                 if self.items[i].pinned {
-                    if let Some(f) = &fmt {
-                        let t: Vec<u16> = "★".encode_utf16().collect();
-                        let pr = D2D_RECT_F { left: rf.left + 4.0 * s, top: rf.top + 2.0 * s, right: rf.right, bottom: rf.bottom };
-                        rt.DrawText(&t, f, &pr, &accent, D2D1_DRAW_TEXT_OPTIONS_NONE, DWRITE_MEASURING_MODE_NATURAL);
-                    }
+                    crate::ui::pill(&rt, &self.res, "★", rf.right - 30.0 * s, rf.top + 8.0 * s, s, 0xFFD54F);
                 }
-                if self.selected.contains(&i) {
-                    rt.DrawRectangle(&rf, &accent, 3.0 * s, None);
+                if selected {
+                    let ring = D2D1_ROUNDED_RECT { rect: D2D_RECT_F { left: rf.left - 1.5 * s, top: rf.top - 1.5 * s, right: rf.right + 1.5 * s, bottom: rf.bottom + 1.5 * s }, radiusX: radius + 1.5 * s, radiusY: radius + 1.5 * s };
+                    rt.DrawRoundedRectangle(&ring, &accent, 2.5 * s, None);
+                } else if let Some(b) = brush(0xFFFFFF, if hovered { 0.22 } else { 0.06 }) {
+                    rt.DrawRoundedRectangle(&shape, &b, 1.0, None);
                 }
             }
             if rt.EndDraw(None, None).is_err() {
                 self.rt = None;
             }
+        }
+    }
+
+    /// Hints for the footer: what the keys do for the current selection.
+    fn footer_hint(&self) -> String {
+        if self.text_tab {
+            return "Enter, Ctrl+C — копировать   ·   перетащите наружу   ·   Ctrl+P — закрепить   ·   Del — удалить   ·   Tab — снимки".into();
+        }
+        let sel = self.sorted_selection();
+        let Some(&i) = sel.first() else {
+            return "Выберите снимок или перетащите его в чат   ·   Tab — текст   ·   Esc — закрыть".into();
+        };
+        let f = &self.items[i].file;
+        if sel.len() > 1 {
+            format!("Выбрано: {}   ·   перетащите наружу   ·   Ctrl+Shift+C — пути   ·   P — закрепить   ·   Del — удалить", sel.len())
+        } else if f.ends_with(".mp4") {
+            "Ctrl+C — копировать файл   ·   G — сделать GIF   ·   Enter — открыть   ·   P — закрепить   ·   Del — удалить".into()
+        } else if f.ends_with(".gif") {
+            "Ctrl+C — копировать файл   ·   Enter — открыть   ·   O — в папке   ·   P — закрепить   ·   Del — удалить".into()
+        } else {
+            "Ctrl+C — копировать   ·   T — текст   ·   R — проверить личное   ·   Ctrl+Shift+C — путь   ·   P — закрепить   ·   Del — удалить".into()
         }
     }
 
@@ -601,6 +665,15 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) 
             }
             WM_MOUSEMOVE => {
                 let (x, y) = lp_xy(lp);
+                with(|s| {
+                    let h = if s.text_tab { None } else { s.hit(x, y) };
+                    if h != s.hover {
+                        s.hover = h;
+                        s.redraw();
+                    }
+                    let mut tme = TRACKMOUSEEVENT { cbSize: size_of::<TRACKMOUSEEVENT>() as u32, dwFlags: TME_LEAVE, hwndTrack: s.hwnd, dwHoverTime: 0 };
+                    let _ = TrackMouseEvent(&mut tme);
+                });
                 let drag = with(|s| match s.press {
                     Some((px, py)) if (x - px).abs() > 4 || (y - py).abs() > 4 => {
                         s.press = None;
@@ -616,6 +689,14 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) 
                         start_drag();
                     }
                 }
+                LRESULT(0)
+            }
+            0x02A3 /* WM_MOUSELEAVE */ => {
+                with(|s| {
+                    if s.hover.take().is_some() {
+                        s.redraw();
+                    }
+                });
                 LRESULT(0)
             }
             WM_LBUTTONUP => {
@@ -723,7 +804,7 @@ impl Shelf {
 
     /// Rows that fit under the header and the search line.
     fn text_rows(&self) -> usize {
-        ((self.size.1 as f32 - self.header() as f32 - 34.0 * self.scale) / self.text_row_h()).max(1.0) as usize
+        ((self.size.1 as f32 - self.header() as f32 - self.footer() as f32 - 40.0 * self.scale) / self.text_row_h()).max(1.0) as usize
     }
 
     fn refresh_texts(&mut self) {
@@ -744,11 +825,11 @@ impl Shelf {
     fn tab_rects(&self) -> (Rect, Rect) {
         let s = self.scale;
         let h = self.header();
-        (Rect::new((8.0 * s) as i32, 0, (80.0 * s) as i32, h), Rect::new((84.0 * s) as i32, 0, (150.0 * s) as i32, h))
+        (Rect::new((10.0 * s) as i32, 0, (90.0 * s) as i32, h), Rect::new((94.0 * s) as i32, 0, (160.0 * s) as i32, h))
     }
 
     fn text_row_at(&self, y: i32) -> Option<usize> {
-        let top = self.header() as f32 + 34.0 * self.scale;
+        let top = self.header() as f32 + 40.0 * self.scale;
         if (y as f32) < top {
             return None;
         }
@@ -824,11 +905,12 @@ impl Shelf {
         let s = self.scale;
         for (r, label, on) in [(a, "Снимки", !self.text_tab), (b, "Текст", self.text_tab)] {
             let t: Vec<u16> = label.encode_utf16().collect();
-            let rr = D2D_RECT_F { left: r.l as f32 + 4.0 * s, top: 9.0 * s, right: r.r as f32, bottom: r.b as f32 };
+            let rr = D2D_RECT_F { left: r.l as f32 + 6.0 * s, top: 13.0 * s, right: r.r as f32, bottom: r.b as f32 };
             unsafe {
                 rt.DrawText(&t, fmt, &rr, if on { text } else { dim }, D2D1_DRAW_TEXT_OPTIONS_NONE, DWRITE_MEASURING_MODE_NATURAL);
                 if on {
-                    rt.FillRectangle(&D2D_RECT_F { left: r.l as f32 + 4.0 * s, top: r.b as f32 - 3.0 * s, right: r.r as f32 - 8.0 * s, bottom: r.b as f32 - 1.0 * s }, accent);
+                    let bar = D2D1_ROUNDED_RECT { rect: D2D_RECT_F { left: r.l as f32 + 6.0 * s, top: r.b as f32 - 3.0 * s, right: r.r as f32 - 10.0 * s, bottom: r.b as f32 }, radiusX: 1.5 * s, radiusY: 1.5 * s };
+                    rt.FillRoundedRectangle(&bar, accent);
                 }
             }
         }
@@ -842,23 +924,32 @@ impl Shelf {
             let u: Vec<u16> = t.encode_utf16().collect();
             unsafe { rt.DrawText(&u, f, &r, b, D2D1_DRAW_TEXT_OPTIONS_CLIP, DWRITE_MEASURING_MODE_NATURAL) };
         };
-        let q = if self.query.is_empty() { "Поиск: начните печатать…".to_string() } else { format!("Поиск: {}▏", self.query) };
-        draw(&q, fmt, D2D_RECT_F { left: 12.0 * s, top: top + 6.0 * s, right: w, bottom: top + 30.0 * s }, if self.query.is_empty() { dim } else { text });
-        let y0 = top + 34.0 * s;
+        // Search field.
+        let field = D2D1_ROUNDED_RECT { rect: D2D_RECT_F { left: 12.0 * s, top: top + 8.0 * s, right: w - 12.0 * s, bottom: top + 34.0 * s }, radiusX: 7.0 * s, radiusY: 7.0 * s };
+        if let Ok(b) = unsafe { rt.CreateSolidColorBrush(&crate::annot::rgba(0x2A2A2E, 1.0), None) } {
+            unsafe { rt.FillRoundedRectangle(&field, &b) };
+        }
+        let q = if self.query.is_empty() { "Поиск — просто начните печатать".to_string() } else { format!("{}▏", self.query) };
+        draw(&q, fmt, D2D_RECT_F { left: 24.0 * s, top: top + 12.0 * s, right: w - 24.0 * s, bottom: top + 34.0 * s }, if self.query.is_empty() { dim } else { text });
+        let y0 = top + 40.0 * s;
         if self.texts.is_empty() {
-            draw("Нет записей", fmt, D2D_RECT_F { left: 12.0 * s, top: y0 + 8.0 * s, right: w, bottom: y0 + 30.0 * s }, dim);
+            draw(if self.query.is_empty() { "Скопируйте любой текст — он появится здесь" } else { "Ничего не найдено" }, fmt, D2D_RECT_F { left: 12.0 * s, top: y0 + 8.0 * s, right: w, bottom: y0 + 30.0 * s }, dim);
         }
         let rh = self.text_row_h();
         for (i, e) in self.texts.iter().enumerate().skip(self.ttop).take(self.text_rows()) {
             let y = y0 + (i - self.ttop) as f32 * rh;
             if i == self.tsel {
-                unsafe { rt.FillRectangle(&D2D_RECT_F { left: 2.0, top: y, right: w - 2.0, bottom: y + rh }, sel) };
+                let r = D2D1_ROUNDED_RECT { rect: D2D_RECT_F { left: 8.0 * s, top: y + 1.0 * s, right: w - 8.0 * s, bottom: y + rh - 1.0 * s }, radiusX: 7.0 * s, radiusY: 7.0 * s };
+                unsafe { rt.FillRoundedRectangle(&r, sel) };
             }
             let first = e.text.lines().find(|l| !l.trim().is_empty()).unwrap_or("").trim();
             let pin = if e.pinned { "★ " } else { "" };
-            draw(&format!("{pin}{}", crate::clipkind::clip_chars(first, 120)), fmt, D2D_RECT_F { left: 12.0 * s, top: y + 3.0 * s, right: w - 12.0 * s, bottom: y + 22.0 * s }, if e.pinned { accent } else { text });
-            let meta = format!("{} · {} симв. · {}", if e.source.is_empty() { "—" } else { &e.source }, e.text.chars().count(), if e.pinned && !crate::texthist::template_fields(&e.text).is_empty() { "шаблон" } else { "" });
-            draw(&meta, small, D2D_RECT_F { left: 12.0 * s, top: y + 21.0 * s, right: w - 12.0 * s, bottom: y + 38.0 * s }, dim);
+            draw(&format!("{pin}{}", crate::clipkind::clip_chars(first, 120)), fmt, D2D_RECT_F { left: 20.0 * s, top: y + 3.0 * s, right: w - 12.0 * s, bottom: y + 22.0 * s }, if e.pinned { accent } else { text });
+            let mut meta = format!("{}  ·  {}  ·  {} симв.", age(e.time), if e.source.is_empty() { "—" } else { e.source.trim_end_matches(".exe") }, e.text.chars().count());
+            if e.pinned && !crate::texthist::template_fields(&e.text).is_empty() {
+                meta.push_str("  ·  шаблон");
+            }
+            draw(&meta, small, D2D_RECT_F { left: 20.0 * s, top: y + 21.0 * s, right: w - 12.0 * s, bottom: y + 38.0 * s }, dim);
         }
     }
 }
@@ -869,5 +960,94 @@ fn start_text_drag() {
     modal(|| dropped = crate::dragdrop::drag_text(&text));
     if dropped {
         with(|s| s.hide());
+    }
+}
+
+/// Rounded corners and a hairline border from DWM (Windows 11).
+fn round_corners(hwnd: HWND) {
+    use windows::Win32::Graphics::Dwm::*;
+    unsafe {
+        let pref = DWMWCP_ROUND;
+        let _ = DwmSetWindowAttribute(hwnd, DWMWA_WINDOW_CORNER_PREFERENCE, &pref as *const _ as _, size_of_val(&pref) as u32);
+        let border: u32 = 0x003A3A3C; // COLORREF 0x00BBGGRR
+        let _ = DwmSetWindowAttribute(hwnd, DWMWA_BORDER_COLOR, &border as *const _ as _, 4);
+    }
+}
+
+/// "только что", "5 мин", "3 ч", "2 дн", or a date.
+pub fn age_text(created: u64, now: u64) -> String {
+    let d = now.saturating_sub(created);
+    match d {
+        0..60 => "только что".into(),
+        60..3600 => format!("{} мин", d / 60),
+        3600..86400 => format!("{} ч", d / 3600),
+        86400..604800 => format!("{} дн", d / 86400),
+        _ => {
+            let days = created / 86400;
+            let (y, m, dd) = civil_from_days(days as i64);
+            format!("{dd:02}.{m:02}.{y}")
+        }
+    }
+}
+
+fn age(created: u64) -> String {
+    let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
+    age_text(created, now)
+}
+
+/// "1 снимок", "3 снимка", "11 снимков".
+pub fn plural(n: usize, one: &str, few: &str, many: &str) -> String {
+    let w = match (n % 10, n % 100) {
+        (1, r) if r != 11 => one,
+        (2..=4, r) if !(12..=14).contains(&r) => few,
+        _ => many,
+    };
+    format!("{n} {w}")
+}
+
+/// "340 КБ", "1,2 МБ".
+pub fn human_size(bytes: u64) -> String {
+    if bytes < 1_000_000 {
+        format!("{} КБ", (bytes + 999) / 1000)
+    } else {
+        format!("{:.1} МБ", bytes as f64 / 1e6).replace('.', ",")
+    }
+}
+
+/// Days since 1970-01-01 → (year, month, day) in UTC (Howard Hinnant's algorithm).
+fn civil_from_days(z: i64) -> (i64, u32, u32) {
+    let z = z + 719_468;
+    let era = z.div_euclid(146_097);
+    let doe = z.rem_euclid(146_097);
+    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = (doy - (153 * mp + 2) / 5 + 1) as u32;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 } as u32;
+    (yoe + era * 400 + (m <= 2) as i64, m, d)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn ages_and_sizes() {
+        let now = 1_800_000_000;
+        assert_eq!(age_text(now - 5, now), "только что");
+        assert_eq!(age_text(now - 125, now), "2 мин");
+        assert_eq!(age_text(now - 7200, now), "2 ч");
+        assert_eq!(age_text(now - 3 * 86400, now), "3 дн");
+        // 2026-10-15 00:00 UTC = 1_792_022_400.
+        assert_eq!(age_text(1_792_022_400, now), "15.10.2026");
+        assert_eq!(civil_from_days(0), (1970, 1, 1));
+        assert_eq!(human_size(340_000), "340 КБ");
+        assert_eq!(human_size(1), "1 КБ");
+        assert_eq!(human_size(1_250_000), "1,2 МБ");
+        assert_eq!(plural(1, "снимок", "снимка", "снимков"), "1 снимок");
+        assert_eq!(plural(3, "снимок", "снимка", "снимков"), "3 снимка");
+        assert_eq!(plural(11, "снимок", "снимка", "снимков"), "11 снимков");
+        assert_eq!(plural(22, "снимок", "снимка", "снимков"), "22 снимка");
+        assert_eq!(plural(25, "снимок", "снимка", "снимков"), "25 снимков");
     }
 }

@@ -24,8 +24,12 @@ use windows::core::*;
 /// Set while a session runs: the keyboard hook turns Enter/Esc into STOP.
 pub static ACTIVE: AtomicBool = AtomicBool::new(false);
 pub static STOP: AtomicBool = AtomicBool::new(false);
+/// Ctrl+C finished the session: copy the result instead of opening markup.
+pub static COPY: AtomicBool = AtomicBool::new(false);
 static HEIGHT: AtomicU32 = AtomicU32::new(0);
 static MANUAL: AtomicBool = AtomicBool::new(false);
+/// Manual mode: the last frame did not overlap (scrolled too fast).
+static TOO_FAST: AtomicBool = AtomicBool::new(false);
 
 const CLASS: PCWSTR = w!("Shelf.ScrollFrame");
 const PAD: i32 = 4;
@@ -47,7 +51,9 @@ pub fn start(rect: Rect) {
     if ACTIVE.swap(true, Ordering::Relaxed) {
         return;
     }
+    COPY.store(false, Ordering::Relaxed);
     STOP.store(false, Ordering::Relaxed);
+    TOO_FAST.store(false, Ordering::Relaxed);
     HEIGHT.store(rect.h() as u32, Ordering::Relaxed);
     let cfg = crate::config::current().scroll_capture;
     MANUAL.store(cfg.mode.eq_ignore_ascii_case("manual"), Ordering::Relaxed);
@@ -60,7 +66,18 @@ pub fn start(rect: Rect) {
             match result {
                 Some(img) => {
                     log::info!("scroll capture: {}x{}", img.w, img.h);
-                    crate::overlay::show_image(Arc::new(img));
+                    let img = Arc::new(img);
+                    if COPY.load(Ordering::Relaxed) {
+                        let owner = crate::main_hwnd();
+                        if crate::clipboard::is_huge(&img) {
+                            crate::clipboard::set_png_only(owner, &img);
+                        } else {
+                            crate::clipboard::set_image(owner, img.clone());
+                        }
+                        crate::history::add_async(img, "scroll");
+                    } else {
+                        crate::overlay::show_image(img);
+                    }
                 }
                 None => log::warn!("scroll capture: nothing captured"),
             }
@@ -129,6 +146,16 @@ fn run(rect: Rect, cfg: &crate::config::ScrollCapture) -> Option<Image> {
         let mut unchanged = 0;
         let mut scrolled: i32 = 0;
         let mut progressed = false;
+        // Auto mode: wait until the keys of the shortcut are released, or a held Ctrl
+        // would turn our wheel into browser zoom.
+        if !MANUAL.load(Ordering::Relaxed) {
+            let held = || [VK_CONTROL, VK_SHIFT, VK_MENU, VK_LWIN, VK_RWIN].iter().any(|k| GetAsyncKeyState(k.0 as i32) < 0);
+            let t0 = std::time::Instant::now();
+            while held() && t0.elapsed() < Duration::from_secs(5) && !STOP.load(Ordering::Relaxed) {
+                std::thread::sleep(Duration::from_millis(20));
+            }
+            std::thread::sleep(Duration::from_millis(100));
+        }
         loop {
             if STOP.load(Ordering::Relaxed) || st.height() >= max_h {
                 break;
@@ -146,11 +173,19 @@ fn run(rect: Rect, cfg: &crate::config::ScrollCapture) -> Option<Image> {
             match st.push(&frame) {
                 Step::Added(_) => {
                     unchanged = 0;
+                    if TOO_FAST.swap(false, Ordering::Relaxed) {
+                        update_label();
+                    }
                     progressed = true;
                     HEIGHT.store(st.height() as u32, Ordering::Relaxed);
                     update_label();
                 }
-                Step::Unchanged if manual => {}
+                Step::Unchanged if manual => {
+                    // Back where the last good frame was: the warning is over.
+                    if TOO_FAST.swap(false, Ordering::Relaxed) {
+                        update_label();
+                    }
+                }
                 Step::Unchanged => {
                     unchanged += 1;
                     if unchanged >= 2 {
@@ -160,6 +195,13 @@ fn run(rect: Rect, cfg: &crate::config::ScrollCapture) -> Option<Image> {
                         // The window ignores synthetic wheel input: let the user scroll.
                         log::info!("scroll capture: no response to the wheel, switching to manual");
                         MANUAL.store(true, Ordering::Relaxed);
+                        update_label();
+                    }
+                }
+                Step::Lost if manual => {
+                    // Scrolled too far at once: keep going, ask to scroll back a little.
+                    if !TOO_FAST.swap(true, Ordering::Relaxed) {
+                        log::info!("scroll capture: frames do not overlap, waiting for the user to scroll back");
                         update_label();
                     }
                 }
@@ -180,7 +222,9 @@ fn run(rect: Rect, cfg: &crate::config::ScrollCapture) -> Option<Image> {
                     std::thread::sleep(Duration::from_millis(15));
                 }
         }
-        let _ = SetCursorPos(saved_cursor.x, saved_cursor.y);
+        if scrolled > 0 {
+            let _ = SetCursorPos(saved_cursor.x, saved_cursor.y);
+        }
         SelectObject(dc, old);
         let _ = DeleteObject(bmp.into());
         let _ = DeleteDC(dc);
@@ -246,10 +290,12 @@ impl FrameWin {
         let label = LABEL_H as f32 * s;
         let (w, h) = (self.rect.w() as f32 + 2.0 * pad, self.rect.h() as f32 + 2.0 * pad + label);
         let manual = MANUAL.load(Ordering::Relaxed);
-        let text = if manual {
-            format!("Прокручивайте сами · {} px · Enter — готово", HEIGHT.load(Ordering::Relaxed))
+        let text = if TOO_FAST.load(Ordering::Relaxed) {
+            "Слишком быстро — прокрутите чуть назад".to_string()
+        } else if manual {
+            format!("Прокручивайте сами · {} px · Ctrl+C — копировать · Enter — готово", HEIGHT.load(Ordering::Relaxed))
         } else {
-            format!("Прокрутка… {} px · Enter/Esc — стоп", HEIGHT.load(Ordering::Relaxed))
+            format!("Прокрутка… {} px · Ctrl+C — копировать · Enter/Esc — стоп", HEIGHT.load(Ordering::Relaxed))
         };
         unsafe {
             let dc = &g.dc;

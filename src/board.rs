@@ -6,9 +6,7 @@ use crate::geom::Rect;
 use crate::ink::{Gpu, create_gpu};
 use std::cell::RefCell;
 use windows::Win32::Foundation::*;
-use windows::Win32::Graphics::Direct2D::Common::*;
 use windows::Win32::Graphics::Direct2D::*;
-use windows::Win32::Graphics::DirectWrite::*;
 use windows::Win32::Graphics::Dxgi::*;
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::UI::Input::KeyboardAndMouse::*;
@@ -27,6 +25,8 @@ struct Board {
     doc: annot::Doc,
     tool: Tool,
     color: u32,
+    /// Cursor in window coordinates, for toolbar hover.
+    hover: (i32, i32),
     width: f32,
     pending: Option<Shape>,
     pan_from: Option<(i32, i32, (f32, f32))>,
@@ -66,6 +66,7 @@ pub fn init() {
             doc: annot::Doc::default(),
             tool: Tool::Pen,
             color: annot::PALETTE[6],
+            hover: (-1, -1),
             width: 3.0,
             pending: None,
             pan_from: None,
@@ -143,7 +144,9 @@ impl Board {
 
     fn toolbar(&self) -> Vec<Rect> {
         // Laid out in window coordinates along the bottom edge.
-        let w = Rect::new(0, 0, self.mon.w(), self.mon.h());
+        // Above the taskbar: the work area in window coordinates.
+        let wa = crate::overlay::work_area(self.mon.l + 1, self.mon.t + 1).unwrap_or(self.mon);
+        let w = Rect::new(wa.l - self.mon.l, wa.t - self.mon.t, wa.r - self.mon.l, wa.b - self.mon.t);
         let anchor = Rect::new(w.r - 1, w.b - 1, w.r, w.b);
         annot::toolbar_layout(&anchor, &w, self.scale)
     }
@@ -322,41 +325,8 @@ impl Board {
                 annot::draw(dc, &g.res, std::slice::from_ref(p), self.cam);
             }
             // Toolbar and hint.
-            let brush = |c: u32, a: f32| dc.CreateSolidColorBrush(&annot::rgba(c, a), None).ok();
-            let fmt = g.res.text_format(15.0 * s);
-            if let (Some(black), Some(white), Some(accent), Some(dim)) = (brush(0, 0.75), brush(0xFFFFFF, 1.0), brush(0x2F8CFF, 1.0), brush(0xFFFFFF, 0.35)) {
-                for (i, r) in self.toolbar().iter().enumerate() {
-                    let d = D2D_RECT_F { left: r.l as f32, top: r.t as f32, right: r.r as f32, bottom: r.b as f32 };
-                    dc.FillRectangle(&d, &black);
-                    if let Some(&tool) = annot::TOOLS.get(i) {
-                        if let Some(f) = &fmt {
-                            let _ = f.SetTextAlignment(DWRITE_TEXT_ALIGNMENT_CENTER);
-                            let _ = f.SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
-                            let t: Vec<u16> = tool.glyph().encode_utf16().collect();
-                            let fg = if tool == Tool::Blur { &dim } else { &white };
-                            dc.DrawText(&t, f, &d, fg, D2D1_DRAW_TEXT_OPTIONS_NONE, DWRITE_MEASURING_MODE_NATURAL);
-                        }
-                        if tool == self.tool {
-                            dc.DrawRectangle(&d, &accent, 2.0 * s, None);
-                        }
-                    } else {
-                        let c = annot::PALETTE[i - annot::TOOLS.len()];
-                        let inset = 6.0 * s;
-                        if let Some(b) = brush(c, 1.0) {
-                            dc.FillRectangle(&D2D_RECT_F { left: d.left + inset, top: d.top + inset, right: d.right - inset, bottom: d.bottom - inset }, &b);
-                        }
-                        if c == self.color {
-                            dc.DrawRectangle(&d, &white, 2.0 * s, None);
-                        }
-                    }
-                }
-                if let Some(f) = g.res.text_format(12.0 * s) {
-                    let hint = "Esc — save to shelf and close   ·   middle button or Space+drag — pan   ·   Ctrl+Z / Ctrl+Y";
-                    let t: Vec<u16> = hint.encode_utf16().collect();
-                    let r = D2D_RECT_F { left: 12.0 * s, top: 10.0 * s, right: self.mon.w() as f32, bottom: 40.0 * s };
-                    dc.DrawText(&t, &f, &r, &dim, D2D1_DRAW_TEXT_OPTIONS_NONE, DWRITE_MEASURING_MODE_NATURAL);
-                }
-            }
+            crate::ui::toolbar(dc, &g.res, &self.toolbar(), (0, 0), Some(self.tool), self.color, self.hover, s, &[Tool::Blur]);
+            crate::ui::pill(dc, &g.res, "Esc — сохранить на полку  ·  средняя кнопка или Space + мышь — сдвиг  ·  Ctrl+Z / Ctrl+Y", 14.0 * s, 12.0 * s, s, crate::ui::MUTED);
             if dc.EndDraw(None, None).is_err() {
                 self.gpu = None;
                 return;
@@ -406,6 +376,14 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) 
                         b.render();
                     } else if b.pending.is_some() {
                         b.extend(x, y);
+                    } else {
+                        // Redraw only when hover changes over the toolbar.
+                        let bar = b.toolbar();
+                        let was = bar.iter().position(|r| r.contains(b.hover.0, b.hover.1));
+                        b.hover = (x, y);
+                        if bar.iter().position(|r| r.contains(x, y)) != was {
+                            b.render();
+                        }
                     }
                 });
                 LRESULT(0)

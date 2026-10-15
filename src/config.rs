@@ -86,7 +86,7 @@ pub struct ScrollCapture {
 
 impl Default for ScrollCapture {
     fn default() -> Self {
-        Self { key: "Ctrl+L".into(), mode: "auto".into(), step: 3, settle_ms: 150, max_height: 30000, restore_scroll: true }
+        Self { key: "Ctrl+L".into(), mode: "manual".into(), step: 3, settle_ms: 150, max_height: 30000, restore_scroll: true }
     }
 }
 
@@ -516,7 +516,7 @@ ignore_processes = ["KeePass.exe", "KeePassXC.exe", "1Password.exe", "Bitwarden.
 [scroll_capture]
 key = "Ctrl+L"
 # auto (Shelf scrolls) or manual (you scroll, Enter finishes)
-mode = "auto"
+mode = "manual"
 # Wheel notches per step and wait after each step (ms)
 step = 3
 settle_ms = 150

@@ -13,7 +13,6 @@ use std::time::Instant;
 use windows::Win32::Foundation::*;
 use windows::Win32::Graphics::Direct2D::Common::*;
 use windows::Win32::Graphics::Direct2D::*;
-use windows::Win32::Graphics::DirectWrite::*;
 use windows::Win32::Graphics::Dwm::*;
 use windows::Win32::Graphics::Dxgi::Common::*;
 use windows::Win32::Graphics::Gdi::*;
@@ -59,7 +58,6 @@ struct Gfx {
     black: ID2D1SolidColorBrush,
     accent: ID2D1SolidColorBrush,
     dim: ID2D1SolidColorBrush,
-    text: IDWriteTextFormat,
 }
 
 pub struct Overlay {
@@ -74,6 +72,8 @@ pub struct Overlay {
     mode: Mode,
     sel: Rect,
     cursor: (i32, i32),
+    /// Last plain click (time, point) for double-click detection.
+    last_click: Option<(std::time::Instant, (i32, i32))>,
     visible: bool,
     pub magnifier: bool,
     // Markup
@@ -150,6 +150,7 @@ pub fn init(owner: HWND, magnifier: bool) {
             mode: Mode::Hover,
             sel: Rect::default(),
             cursor: (0, 0),
+            last_click: None,
             visible: false,
             magnifier,
             res: annot::Res::new(&factory),
@@ -211,10 +212,6 @@ impl Overlay {
                 log::error!("CreateHwndRenderTarget failed");
                 return;
             };
-            let dw: IDWriteFactory = DWriteCreateFactory(DWRITE_FACTORY_TYPE_SHARED).unwrap();
-            let text = dw
-                .CreateTextFormat(w!("Segoe UI"), None, DWRITE_FONT_WEIGHT_SEMI_BOLD, DWRITE_FONT_STYLE_NORMAL, DWRITE_FONT_STRETCH_NORMAL, 12.0, w!(""))
-                .unwrap();
             self.gfx = Some(Gfx {
                 white: rt.CreateSolidColorBrush(&color(1.0, 1.0, 1.0, 1.0), None).unwrap(),
                 black: rt.CreateSolidColorBrush(&color(0.0, 0.0, 0.0, 0.75), None).unwrap(),
@@ -222,7 +219,6 @@ impl Overlay {
                 dim: rt.CreateSolidColorBrush(&color(0.0, 0.0, 0.0, 0.45), None).unwrap(),
                 rt,
                 bmp: None,
-                text,
             });
         }
     }
@@ -382,7 +378,8 @@ impl Overlay {
             if !target.is_empty() {
                 let t = local(&target);
                 g.rt.DrawBitmap(bmp, Some(&t), 1.0, D2D1_BITMAP_INTERPOLATION_MODE_NEAREST_NEIGHBOR, Some(&t));
-                self.draw_markup(g, &t);
+                // Markup is shown over the whole screen (as in Lightshot); the result keeps only the selection.
+                self.draw_markup(g, &full);
                 let bw = (scale).max(1.0).round();
                 let border = D2D_RECT_F { left: t.left - bw / 2.0, top: t.top - bw / 2.0, right: t.right + bw / 2.0, bottom: t.bottom + bw / 2.0 };
                 g.rt.DrawRectangle(&border, &g.accent, bw, None);
@@ -441,79 +438,38 @@ impl Overlay {
 
     fn toolbar(&self) -> Vec<Rect> {
         let c = ((self.sel.l + self.sel.r) / 2, (self.sel.t + self.sel.b) / 2);
-        let mon = self.monitor_at(c.0, c.1);
+        // Work area, so the bar of a full-screen selection does not sit on the taskbar.
+        let mon = work_area(c.0, c.1).unwrap_or_else(|| self.monitor_at(c.0, c.1));
         annot::toolbar_layout(&self.sel, &mon, geom::scale_at(&self.monitors, c.0, c.1))
     }
 
     fn draw_toolbar(&self, g: &Gfx, scale: f32) {
-        let fmt = self.res.text_format(15.0 * scale);
-        unsafe {
-            if let Some(f) = &fmt {
-                let _ = f.SetTextAlignment(DWRITE_TEXT_ALIGNMENT_CENTER);
-                let _ = f.SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
-            }
-            for (i, r) in self.toolbar().iter().enumerate() {
-                let d = rf(&r.offset(-self.bounds.l, -self.bounds.t));
-                g.rt.FillRectangle(&d, &g.black);
-                if let Some(&tool) = annot::TOOLS.get(i) {
-                    if let Some(f) = &fmt {
-                        let t: Vec<u16> = tool.glyph().encode_utf16().collect();
-                        g.rt.DrawText(&t, f, &d, &g.white, D2D1_DRAW_TEXT_OPTIONS_NONE, DWRITE_MEASURING_MODE_NATURAL);
-                    }
-                    if self.tool == Some(tool) {
-                        g.rt.DrawRectangle(&d, &g.accent, 2.0 * scale, None);
-                    }
-                } else {
-                    let c = annot::PALETTE[i - annot::TOOLS.len()];
-                    let inset = 6.0 * scale;
-                    let sw = D2D_RECT_F { left: d.left + inset, top: d.top + inset, right: d.right - inset, bottom: d.bottom - inset };
-                    if let Ok(b) = g.rt.CreateSolidColorBrush(&annot::rgba(c, 1.0), None) {
-                        g.rt.FillRectangle(&sw, &b);
-                    }
-                    if c == self.color {
-                        g.rt.DrawRectangle(&d, &g.white, 2.0 * scale, None);
-                    }
-                }
-            }
-        }
+        crate::ui::toolbar(&g.rt, &self.res, &self.toolbar(), (self.bounds.l, self.bounds.t), self.tool, self.color, self.cursor, scale, &[]);
     }
 
     unsafe fn draw_handles(&self, g: &Gfx, t: &D2D_RECT_F, scale: f32) {
-        let s = 3.0 * scale;
         let mx = (t.left + t.right) / 2.0;
         let my = (t.top + t.bottom) / 2.0;
         for (x, y) in [(t.left, t.top), (mx, t.top), (t.right, t.top), (t.left, my), (t.right, my), (t.left, t.bottom), (mx, t.bottom), (t.right, t.bottom)] {
-            let r = D2D_RECT_F { left: x - s, top: y - s, right: x + s, bottom: y + s };
-            unsafe {
-                g.rt.FillRectangle(&r, &g.white);
-                g.rt.DrawRectangle(&r, &g.accent, 1.0, None);
-            }
+            crate::ui::handle(&g.rt, x, y, scale);
         }
     }
 
     fn label(&self, g: &Gfx, text: &str, x: f32, y: f32, scale: f32) {
-        let w16: Vec<u16> = text.encode_utf16().collect();
-        let w = (7.0 * text.chars().count() as f32 + 10.0) * scale;
-        let h = 18.0 * scale;
-        let bg = D2D_RECT_F { left: x, top: y, right: x + w, bottom: y + h };
-        unsafe {
-            g.rt.FillRectangle(&bg, &g.black);
-            g.rt.SetTransform(&windows_numerics::Matrix3x2 { M11: scale, M12: 0.0, M21: 0.0, M22: scale, M31: x + 5.0 * scale, M32: y + 1.0 * scale });
-            let lr = D2D_RECT_F { left: 0.0, top: 0.0, right: w / scale, bottom: h / scale };
-            g.rt.DrawText(&w16, &g.text, &lr, &g.white, D2D1_DRAW_TEXT_OPTIONS_NONE, DWRITE_MEASURING_MODE_NATURAL);
-            g.rt.SetTransform(&windows_numerics::Matrix3x2::identity());
-        }
+        crate::ui::pill(&g.rt, &self.res, text, x, y, scale, crate::ui::TEXT);
     }
 
     fn draw_size_label(&self, g: &Gfx, target: &Rect, scale: f32) {
         let text = format!("{} × {}", target.w(), target.h());
-        let h = (18.0 * scale) as i32;
+        let h = crate::ui::pill_size(&self.res, &text, scale).1 as i32;
         let mon = self.monitor_at(target.l, target.t);
+        // Inside the selection when there is no room above or the toolbar sits there.
+        let bar_above = matches!(self.mode, Mode::Selected | Mode::Grabbing { .. } | Mode::Annotating) && self.toolbar().first().is_some_and(|r| r.b <= target.t);
         let mut y = target.t - h - (4.0 * scale) as i32;
-        if y < mon.t {
-            y = target.t + (4.0 * scale) as i32;
+        if y < mon.t || bar_above {
+            y = target.t + (6.0 * scale) as i32;
         }
-        self.label(g, &text, (target.l.max(mon.l) - self.bounds.l) as f32, (y - self.bounds.t) as f32, scale);
+        self.label(g, &text, (target.l.max(mon.l) + if y > target.t { (6.0 * scale) as i32 } else { 0 } - self.bounds.l) as f32, (y - self.bounds.t) as f32, scale);
     }
 
     fn draw_magnifier(&self, g: &Gfx, bmp: &ID2D1Bitmap, scale: f32) {
@@ -522,7 +478,7 @@ impl Overlay {
         let size = SRC * zoom;
         let (cx, cy) = self.cursor;
         let mon = self.monitor_at(cx, cy);
-        let label_h = (18.0 * scale) as i32;
+        let label_h = (30.0 * scale) as i32;
         let (px, py) = geom::place_near(cx, cy, size, size + label_h, (20.0 * scale) as i32, &mon);
         let (lx, ly) = ((px - self.bounds.l) as f32, (py - self.bounds.t) as f32);
         let dst = D2D_RECT_F { left: lx, top: ly, right: lx + size as f32, bottom: ly + size as f32 };
@@ -541,10 +497,10 @@ impl Overlay {
             g.rt.DrawLine(Vector2::new(c0 + zoom as f32 / 2.0, ly), Vector2::new(c0 + zoom as f32 / 2.0, c1), &g.dim, 1.0, None);
             g.rt.DrawLine(Vector2::new(c0 + zoom as f32 / 2.0, c1 + zoom as f32), Vector2::new(c0 + zoom as f32 / 2.0, dst.bottom), &g.dim, 1.0, None);
             g.rt.DrawRectangle(&px_rect, &g.white, 1.0, None);
-            g.rt.DrawRectangle(&dst, &g.white, 1.0, None);
+            g.rt.DrawRectangle(&dst, &g.white, 1.5 * scale, None);
         }
         let color = self.pixel(cx, cy).map(|(r, gg, b)| format!("  #{r:02X}{gg:02X}{b:02X}")).unwrap_or_default();
-        self.label(g, &format!("{}, {}{}", cx, cy, color), lx, ly + size as f32, scale);
+        self.label(g, &format!("{}, {}{}", cx, cy, color), lx, ly + size as f32 + 6.0 * scale, scale);
     }
 
     fn pixel(&self, x: i32, y: i32) -> Option<(u8, u8, u8)> {
@@ -583,6 +539,18 @@ impl Overlay {
         if self.redaction_click(x, y) {
             return;
         }
+        // Double click (no tool selected): the whole monitor under the cursor.
+        if let Some((t, p)) = self.last_click.take() {
+            let dbl = unsafe { windows::Win32::UI::Input::KeyboardAndMouse::GetDoubleClickTime() } as u128;
+            let (cx, cy) = unsafe { (GetSystemMetrics(SM_CXDOUBLECLK), GetSystemMetrics(SM_CYDOUBLECLK)) };
+            if self.tool.is_none() && t.elapsed().as_millis() <= dbl && (p.0 - x).abs() <= cx && (p.1 - y).abs() <= cy {
+                self.commit_text();
+                self.sel = self.monitor_at(x, y);
+                self.mode = Mode::Selected;
+                self.redraw();
+                return;
+            }
+        }
         if self.mode == Mode::Selected {
             if let Some(i) = self.toolbar().iter().position(|r| r.contains(x, y)) {
                 self.commit_text();
@@ -594,7 +562,9 @@ impl Overlay {
                 return;
             }
             let grip = geom::hit_test(&self.sel, x, y, self.grip_tol());
-            if let (Some(tool), Some(Grip::Move)) = (self.tool, grip) {
+            // With a tool, drag inside or outside the selection draws (as in Lightshot); only
+            // the edge grips still resize. What is outside is not part of the result.
+            if let (Some(tool), Some(Grip::Move) | None) = (self.tool, grip) {
                 self.start_shape(tool, x, y);
                 return;
             }
@@ -610,8 +580,9 @@ impl Overlay {
 
     fn on_lbutton_up(&mut self) {
         match self.mode {
-            Mode::Pressing { .. } => {
+            Mode::Pressing { at } => {
                 // Click without drag: take the highlighted window.
+                self.last_click = Some((std::time::Instant::now(), at));
                 self.sel = self.hovered_window();
                 self.mode = Mode::Selected;
             }
@@ -965,6 +936,15 @@ impl Overlay {
                     crate::ink::with(|i| {
                         i.rec_rect = Some(r);
                         i.request_render();
+                    });
+                    // Tick the timer and blinking dot of the REC label.
+                    std::thread::spawn(|| {
+                        while crate::record::is_recording() {
+                            std::thread::sleep(std::time::Duration::from_millis(200));
+                            crate::run_on_main(|| {
+                                crate::ink::with(|i| i.request_render());
+                            });
+                        }
                     });
                 }
                 None
@@ -1556,4 +1536,14 @@ pub fn hide_pending() {
         let _ = GetCursorPos(&mut pt);
     }
     crate::chip::show(crate::chip::Content::Notice(format!("Скрыто: {}", found.len())), (pt.x, pt.y));
+}
+
+/// Work area (monitor minus taskbar) of the monitor containing a point, in screen pixels.
+pub fn work_area(x: i32, y: i32) -> Option<Rect> {
+    use windows::Win32::Graphics::Gdi::{GetMonitorInfoW, MONITOR_DEFAULTTONEAREST, MONITORINFO, MonitorFromPoint};
+    unsafe {
+        let h = MonitorFromPoint(POINT { x, y }, MONITOR_DEFAULTTONEAREST);
+        let mut mi = MONITORINFO { cbSize: size_of::<MONITORINFO>() as u32, ..Default::default() };
+        GetMonitorInfoW(h, &mut mi).as_bool().then(|| Rect::new(mi.rcWork.left, mi.rcWork.top, mi.rcWork.right, mi.rcWork.bottom))
+    }
 }

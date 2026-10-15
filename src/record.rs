@@ -31,6 +31,11 @@ pub fn bitrate(w: i32, h: i32, fps: u32) -> u32 {
     ((w as f64 * h as f64 * fps as f64 * 0.12) as u32).clamp(1_000_000, 40_000_000)
 }
 
+/// Time since the recording started.
+pub fn elapsed() -> Option<Duration> {
+    SESSION.lock().unwrap().as_ref().map(|s| s.started.elapsed())
+}
+
 pub fn is_recording() -> bool {
     SESSION.lock().unwrap().is_some()
 }

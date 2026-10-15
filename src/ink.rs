@@ -532,19 +532,20 @@ impl Ink {
             }
             if let Some(r) = self.rec_rect {
                 let s = self.scale_at(r.l, r.t);
-                if let (Some(red), Some(bg), Some(fg)) = (brush(0xE53935, 1.0), brush(0x202020, 0.85), brush(0xFFFFFF, 1.0)) {
+                if let Some(red) = brush(0xE53935, 1.0) {
                     let b = 3.0 * s;
                     let fr = lr(r.l as f32 - b, r.t as f32 - b, r.r as f32 + b, r.b as f32 + b);
                     dc.DrawRectangle(&fr, &red, 2.0 * s, None);
-                    if let Some(fmt) = g.res.text_format(12.0 * s) {
-                        let label = format!("● REC   {} — stop", crate::config::current().record.stop);
-                        let t: Vec<u16> = label.encode_utf16().collect();
-                        let h = 22.0 * s;
-                        let top = if r.t as f32 - b - h - 4.0 * s >= self.bounds.t as f32 { r.t as f32 - b - h - 4.0 * s } else { r.b as f32 + b + 4.0 * s };
-                        let lab = lr(r.l as f32 - b, top, r.l as f32 - b + 7.5 * s * label.chars().count() as f32 + 16.0 * s, top + h);
-                        dc.FillRectangle(&lab, &bg);
-                        let tr = D2D_RECT_F { left: lab.left + 8.0 * s, top: lab.top + 3.0 * s, right: lab.right, bottom: lab.bottom };
-                        dc.DrawText(&t, &fmt, &tr, &fg, D2D1_DRAW_TEXT_OPTIONS_NONE, DWRITE_MEASURING_MODE_NATURAL);
+                    // Pill above the area: blinking red dot, elapsed time, how to stop.
+                    let secs = crate::record::elapsed().map(|d| d.as_secs()).unwrap_or(0);
+                    let label = format!("      {}:{:02}   ·   {} — стоп", secs / 60, secs % 60, crate::config::current().record.stop);
+                    let (_, ph) = crate::ui::pill_size(&g.res, &label, s);
+                    let top = if r.t as f32 - b - ph - 6.0 * s >= self.bounds.t as f32 { r.t as f32 - b - ph - 6.0 * s } else { r.b as f32 + b + 6.0 * s };
+                    let (x, y) = (r.l as f32 - b - o.0, top - o.1);
+                    crate::ui::pill(dc, &g.res, &label, x, y, s, 0xFFFFFF);
+                    let on = crate::record::elapsed().is_none_or(|d| d.as_millis() % 1000 < 600);
+                    if on {
+                        dc.FillEllipse(&D2D1_ELLIPSE { point: Vector2::new(x + 14.0 * s, y + ph / 2.0), radiusX: 4.5 * s, radiusY: 4.5 * s }, &red);
                     }
                 }
             }

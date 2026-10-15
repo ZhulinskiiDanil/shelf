@@ -8,6 +8,16 @@
 pub struct Row {
     pub hash: u64,
     pub uniform: bool,
+    /// Average luma of BINS column strips: a fuzzy signature that survives the slightly
+    /// different antialiasing of fractional (smooth, scaled) browser scrolling.
+    pub bins: [u8; BINS],
+}
+
+pub const BINS: usize = 32;
+
+/// Rows look the same up to rendering noise.
+pub fn similar(a: &Row, b: &Row) -> bool {
+    a.hash == b.hash || a.bins.iter().zip(&b.bins).map(|(x, y)| (*x as i32 - *y as i32).unsigned_abs()).sum::<u32>() <= (BINS as u32) * 3
 }
 
 /// Signatures for a top-down BGRA frame. `skip_right` columns (scrollbar) are ignored.
@@ -19,9 +29,12 @@ pub fn rows(bgra: &[u8], w: usize, h: usize, skip_right: usize) -> Vec<Row> {
             let mut hash: u64 = 0xcbf29ce484222325;
             let mut first = None;
             let mut uniform = true;
-            for p in line.chunks_exact(4) {
+            let mut sums = [0u32; BINS];
+            for (x, p) in line.chunks_exact(4).enumerate() {
+                let l = (p[2] as u32 * 299 + p[1] as u32 * 587 + p[0] as u32 * 114) / 1000;
+                sums[x * BINS / cols] += l;
                 // Rec.601 luma, quantized to 6 bits so tiny rendering noise does not break matches.
-                let g = ((p[2] as u32 * 299 + p[1] as u32 * 587 + p[0] as u32 * 114) / 1000) as u8 >> 2;
+                let g = l as u8 >> 2;
                 hash = (hash ^ g as u64).wrapping_mul(0x100000001b3);
                 match first {
                     None => first = Some(g),
@@ -29,7 +42,12 @@ pub fn rows(bgra: &[u8], w: usize, h: usize, skip_right: usize) -> Vec<Row> {
                     _ => {}
                 }
             }
-            Row { hash, uniform }
+            let mut bins = [0u8; BINS];
+            for (i, b) in bins.iter_mut().enumerate() {
+                let n = (((i + 1) * cols).div_ceil(BINS) - (i * cols).div_ceil(BINS)).max(1) as u32;
+                *b = (sums[i] / n).min(255) as u8;
+            }
+            Row { hash, uniform, bins }
         })
         .collect()
 }
@@ -51,7 +69,8 @@ pub fn find_offset(prev: &[Row], cur: &[Row]) -> Option<usize> {
     if n == 0 {
         return None;
     }
-    if prev[..n] == cur[..n] {
+    // Identical up to noise (at least 97 % of rows): nothing moved.
+    if (0..n).filter(|&i| similar(&prev[i], &cur[i])).count() * 100 >= n * 97 {
         return Some(0);
     }
     let mut best: Option<(usize, usize)> = None; // (dy, matched informative rows)
@@ -64,11 +83,11 @@ pub fn find_offset(prev: &[Row], cur: &[Row]) -> Option<usize> {
                 continue;
             }
             informative += 1;
-            if p.hash == c.hash {
+            if similar(&p, &c) {
                 matched += 1;
             }
         }
-        if informative < 8 || matched * 100 < informative * 97 {
+        if informative < 8 || matched * 100 < informative * 92 {
             continue;
         }
         // The true offset keeps the largest number of matching informative rows.
@@ -191,7 +210,7 @@ mod tests {
         assert_eq!(find_offset(&a, &b), Some(55));
         assert_eq!(find_offset(&a, &a), Some(0));
         // Unrelated content does not match.
-        let c: Vec<Row> = (0..200).map(|i| Row { hash: 1_000_000 + i, uniform: false }).collect();
+        let c: Vec<Row> = (0..200).map(|i| Row { hash: 1_000_000 + i, uniform: false, bins: [(i * 37 % 256) as u8; BINS] }).collect();
         assert_eq!(find_offset(&a, &c), None);
     }
 
@@ -246,7 +265,7 @@ mod tests {
 
     #[test]
     fn bands_are_capped() {
-        let r = |h| Row { hash: h, uniform: false };
+        let r = |h| Row { hash: h, uniform: false, bins: [0; BINS] };
         // Everything identical except one row: header and footer are capped at 40 % each.
         let a: Vec<Row> = (0..10).map(r).collect();
         let mut b = a.clone();
